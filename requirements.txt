@@ -1,0 +1,12 @@
+Django>=5.0,<5.3
+djangorestframework>=3.15
+django-cors-headers>=4.4
+python-dotenv>=1.0
+
+# Optional — only needed for the live LLM voice layer (personas/advisors/defense prose).
+# The default "offline" model client requires neither.
+# anthropic>=0.39
+# openai>=1.50
+
+# Optional — production database driver.
+# psycopg[binary]>=3.2
