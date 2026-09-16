@@ -92,8 +92,14 @@ def advisor_roster() -> list[dict]:
 
 
 # --- Runner -----------------------------------------------------------------------
-def run_history(team_names, submissions_by_round, config) -> list[dict]:
-    return _impl.run_history(team_names, submissions_by_round, config)
+def run_history(team_names, submissions_by_round, config,
+                team_channel_by_round=None, team_message_by_round=None) -> list[dict]:
+    extra = {}
+    if team_channel_by_round:
+        extra["team_channel_by_round"] = team_channel_by_round
+    if team_message_by_round:
+        extra["team_message_by_round"] = team_message_by_round
+    return _impl.run_history(team_names, submissions_by_round, config, **extra)
 
 
 # --- Customer agents --------------------------------------------------------------
@@ -179,3 +185,59 @@ def grade_written_defense(defense_text, packet, cache: Optional[dict] = None):
 
 def combine_report(deterministic_team, prose):
     return _impl.combine_report(deterministic_team, prose)
+
+
+# --- Financials (reporting overlay over existing engine outputs) -------------------
+def _num(d: dict) -> dict:
+    """Coerce a statement's Decimal values to float for JSON, rounded to cents."""
+    return {k: (round(float(v), 2) if hasattr(v, "__float__") else v) for k, v in d.items()}
+
+
+# --- Market research (Group C — rendering over engine state, no feedback) --------
+def research_catalog() -> dict:
+    import research as r
+    return {k: {"cost_stated": float(v["cost_stated"]), "cost_behavioral": float(v["cost_behavioral"])}
+            for k, v in r.STUDY_CATALOG.items()}
+
+
+def render_study(study, mode, ctx):
+    import research as r
+    return r.render_study(study, mode, ctx)
+
+
+def where_to_grow(ctx, mode):
+    import research as r
+    return r.where_to_grow(ctx, mode)
+
+
+def line_extension_effect(launch_state, core_volume, segment_sizes, core_positioning):
+    """Group B line-extension overlay (incremental − cannibalization + crisis credit).
+    App-layer overlay over a computed round; nothing feeds back into the engine."""
+    import line_extension as le
+    return le.line_extension_effect(launch_state, core_volume, segment_sizes, core_positioning)
+
+
+def financials_statements(mkts: list[dict]) -> list[dict]:
+    """Roll the three financial statements across a team's per-round marketing outputs.
+
+    `mkts` is an ordered list, one per closed round, each a dict of $ values:
+    {gross_revenue, promo_allow, brand_spend, perf_spend, research_spend}. Uses the
+    vendored, golden-locked `financials` module (brand-building capitalized & amortized;
+    perf/research expensed). Returns [{round, income, cash_flow, balance}] as floats.
+    """
+    import financials as fin  # vendored (on sys.path via flexee_engine/__init__)
+
+    if not mkts:
+        return []
+    prev = fin.build_opening_state(mkts[0])
+    out = []
+    for i, mkt in enumerate(mkts, start=1):
+        income, cash_flow, balance, state = fin.round_financials(prev, mkt)
+        out.append({
+            "round": i,
+            "income": _num(income),
+            "cash_flow": _num(cash_flow),
+            "balance": _num(balance),
+        })
+        prev = state
+    return out

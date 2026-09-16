@@ -10,3 +10,4 @@ python-dotenv>=1.0
 
 # Optional — production database driver.
 # psycopg[binary]>=3.2
+pytest>=8.0

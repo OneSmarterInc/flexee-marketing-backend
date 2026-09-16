@@ -25,6 +25,12 @@ SEGS = api.SEGS
 
 SCORECARD_DIMS = ("brand_health", "customer_value", "market_position", "financial")
 
+# The engine's decision validation rejects unknown fields, so only these reach the runner.
+# Group B levers (channel/message/line_extension) are app-layer: channel/message are threaded
+# in via the seam, line_extension is a post-round overlay.
+ENGINE_DECISION_FIELDS = ("brand", "perf", "research", "positioning", "emphasis", "price", "promotion")
+GROUP_B_LEVERS = ("channel", "message", "line_extension")
+
 
 def derive_crisis_inputs(pre_crisis_record, teams, severity=1.0, default_response=0.3):
     """Derive per-team crisis_inputs from the pre-crisis (round crisis-1) state.
@@ -102,7 +108,12 @@ class GameService:
         return self.game.teams.get(name=name)
 
     def open_levers(self, rnd: int) -> list[str]:
-        return api.open_levers_for_round(rnd, self.config)
+        # Engine levers (takeover-gated by the faculty config) + app-layer Group B levers
+        # scheduled separately (the engine's lever_open_round must stay the 5 base levers).
+        base = list(api.open_levers_for_round(rnd, self.config))
+        sched = self.config.get("lever_schedule", {}) or {}
+        extras = [l for l in GROUP_B_LEVERS if rnd >= int(sched.get(l, 999))]
+        return base + extras
 
     # ---- round lock / reopen (LOCKED decision) ----
     def is_locked(self, rnd: int) -> bool:
@@ -147,14 +158,88 @@ class GameService:
         qs = self.game.submissions.filter(round__lte=t).select_related("team")
         for sub in qs:
             if 1 <= sub.round <= n:
-                rows[sub.round - 1][sub.team.name] = sub.submitted_levers or {}
+                lv = sub.submitted_levers or {}
+                # Only engine decision fields reach the runner (Group B levers are app-layer).
+                rows[sub.round - 1][sub.team.name] = {k: lv[k] for k in ENGINE_DECISION_FIELDS if k in lv}
         return rows
+
+    # ---- Group B: app-layer channel/message maps + line-extension state ----
+    def _group_b_maps(self, t: int):
+        """Per-round {team: channel_weights} and {team: message} from stored submissions.
+        Returns (channel_by_round, message_by_round) or None when unused (→ neutral engine)."""
+        n = max(t, self._num_rounds())
+        ch = [dict() for _ in range(n)]
+        msg = [dict() for _ in range(n)]
+        for sub in self.game.submissions.filter(round__lte=t).select_related("team"):
+            i = sub.round - 1
+            if not (0 <= i < n):
+                continue
+            lv = sub.submitted_levers or {}
+            if isinstance(lv.get("channel"), dict):
+                ch[i][sub.team.name] = lv["channel"]
+            if lv.get("message"):
+                msg[i][sub.team.name] = lv["message"]
+        return (ch if any(ch) else None, msg if any(msg) else None)
+
+    def _line_ext_info(self, t: int) -> dict:
+        """team -> {launch_round, positioning} for the first round the team launched (sticky)."""
+        info: dict = {}
+        for sub in self.game.submissions.filter(round__lte=t).order_by("round").select_related("team"):
+            le = (sub.submitted_levers or {}).get("line_extension")
+            if isinstance(le, dict) and le.get("launch") and sub.team.name not in info:
+                info[sub.team.name] = {"launch_round": sub.round, "positioning": float(le.get("positioning", 90.0))}
+        return info
+
+    def _apply_line_extension(self, history: list) -> list:
+        """Overlay the functional line's net volume onto each record (incremental −
+        cannibalization), recomputing revenue/contribution. App-layer; the engine is untouched."""
+        info = self._line_ext_info(self._num_rounds())
+        if not info:
+            return history
+        budget = float(self.config.get("round_budget", 10.0))
+        for rec in history:
+            firms = rec.get("firms") or {}
+            sizes = rec.get("segment_sizes") or {}
+            eff = rec.get("effective_decisions") or {}
+            for team, li in info.items():
+                firm = firms.get(team)
+                if not firm:
+                    continue
+                state = {"launched": True, "launch_round": li["launch_round"],
+                         "current_round": rec["round"], "positioning": li["positioning"]}
+                ext = api.line_extension_effect(state, firm.get("volume") or {}, sizes,
+                                                float(eff.get(team, {}).get("positioning", 35.0)))
+                if not ext.get("live"):
+                    continue
+                orig = float(firm.get("total_volume") or 0.0)
+                new_vol = orig + float(ext["net_total"])
+                price = float(firm.get("price") or 0.0)
+                per_unit = ((float(firm.get("contribution") or 0.0)) + budget) / orig if orig else 0.0
+                firm["total_volume"] = new_vol
+                firm["revenue"] = new_vol * price
+                firm["contribution"] = per_unit * new_vol - budget
+                firm["line_extension"] = {
+                    "net_total": ext["net_total"], "rounds_live": ext["rounds_live"],
+                    "incremental": ext["incremental_by_segment"],
+                    "cannibalized": ext["cannibalized_by_segment"],
+                    "crisis_response_credit": ext["crisis_response_credit"],
+                }
+        return history
+
+    def _compute(self, rnd: int) -> list:
+        """Single compute path: engine run with Group B channel/message threaded in, then the
+        line-extension overlay. Used everywhere history is (re-)derived."""
+        names = self.team_names()
+        ch, msg = self._group_b_maps(rnd)
+        history = api.run_history(names, self._submissions_through(rnd), self.config,
+                                  team_channel_by_round=ch, team_message_by_round=msg)
+        return self._apply_line_extension(history)
 
     # ---- round close: pure re-derivation ----
     @transaction.atomic
     def close_round(self, rnd: int) -> dict:
         names = self.team_names()
-        history = api.run_history(names, self._submissions_through(rnd), self.config)
+        history = self._compute(rnd)
 
         # Crisis (decision 1): at/after the crisis round, derive per-team crisis_inputs from
         # the pre-crisis state so the R9 beat is LIVE — unless faculty authored them at setup.
@@ -165,6 +250,7 @@ class GameService:
             self._store_result(rec)
 
         self._advance_relationships(history[rnd - 1])
+        self._score_forecasts(rnd)  # Group C: grade this round's predictions against the result
 
         self.game.current_round = min(rnd + 1, self.game.num_rounds)
         if rnd >= self.game.num_rounds:
@@ -196,7 +282,7 @@ class GameService:
         self.game.config_snapshot = self.config
         self.game.save(update_fields=["config_snapshot"])
         # re-run so the crisis actually lands
-        return api.run_history(names, self._submissions_through(rnd), self.config)
+        return self._compute(rnd)
 
     def _store_result(self, rec: dict) -> None:
         models.RoundResult.objects.update_or_create(
@@ -242,6 +328,127 @@ class GameService:
         recs = [r for r in self.history() if r["round"] == rnd]
         return recs[0] if recs else None
 
+    # ---- financial statements (reporting overlay; closed rounds only) ----
+    def financials(self) -> dict:
+        """Per-team three-statement financials over the closed-round history.
+
+        Composes over engine outputs (revenue, promotion, budget split) — no new
+        market math. A single `financials_budget_scale` maps abstract budget units to
+        dollars so magnitudes read sensibly; all constants are calibrate-later config.
+        """
+        scale = float(self.config.get("financials_budget_scale", 10.0))
+        promo_rate = float(self.config.get("promo_cost_rate", 0.30))
+        hist = self.history()
+        out: dict = {}
+        for t in self.team_names():
+            mkts = []
+            for rec in hist:
+                firm = (rec.get("firms") or {}).get(t)
+                if not firm:
+                    continue
+                dec = (rec.get("effective_decisions") or {}).get(t, {})
+                rev = float(firm.get("revenue", 0.0))
+                tv = float(firm.get("total_volume", 0.0))
+                promo = float(firm.get("promotion", 0.0))
+                mkts.append({
+                    "gross_revenue": str(round(rev * scale, 4)),
+                    "promo_allow": str(round(tv * promo_rate * promo * scale, 4)),
+                    "brand_spend": str(round(float(dec.get("brand", 0.0)) * scale, 4)),
+                    "perf_spend": str(round(float(dec.get("perf", 0.0)) * scale, 4)),
+                    "research_spend": str(round(float(dec.get("research", 0.0)) * scale, 4)),
+                })
+            out[t] = api.financials_statements(mkts)
+        return out
+
+    # ---- market research (Group C: rendering over state + budget ledger) ----
+    def _research_ctx(self, team_name: str):
+        hist = self.history()
+        if not hist:
+            return None
+        rec = hist[-1]
+        firms = rec.get("firms") or {}
+        if team_name not in firms:
+            return None
+        return {
+            "perception_by_firm": {f: firms[f].get("perception", {}) for f in firms},
+            "firm": team_name,
+            "team_positioning": float((rec.get("effective_decisions") or {}).get(team_name, {}).get("positioning", 35.0)),
+            "round": rec["round"],
+        }
+
+    def research_budget(self, team: models.Team) -> dict:
+        total = float(self.config.get("research_budget", 20.0))
+        spent = sum(c.cost for c in self.game.research.filter(team=team))
+        return {"total": total, "spent": round(spent, 2), "remaining": round(total - spent, 2)}
+
+    _WHERE_TO_GROW_COST = {"stated": 3.0, "behavioral": 6.0}
+
+    def commission_research(self, team: models.Team, study: str, mode: str, user=None) -> dict:
+        import research as r
+        if mode not in ("stated", "behavioral"):
+            raise ValidationError({"mode": "must be 'stated' or 'behavioral'"})
+        ctx = self._research_ctx(team.name)
+        if ctx is None:
+            raise ValidationError({"detail": "no closed round yet — commission research after round 1 closes"})
+        if study == "where_to_grow":
+            cost = self._WHERE_TO_GROW_COST[mode]
+        elif study in r.STUDY_CATALOG:
+            spec = r.STUDY_CATALOG[study]
+            cost = float(spec["cost_behavioral"] if mode == "behavioral" else spec["cost_stated"])
+        else:
+            raise ValidationError({"study": "unknown study"})
+        bud = self.research_budget(team)
+        if cost > bud["remaining"] + 1e-9:
+            raise ValidationError({"detail": f"research budget exhausted (need {cost}, have {bud['remaining']})"})
+        if study == "where_to_grow":
+            sheet = {"ranking": api.where_to_grow(ctx, mode)}
+        else:
+            sheet = api.render_study(study, mode, ctx)
+        models.ResearchCommission.objects.create(
+            game=self.game, round=ctx["round"], team=team, study=study, mode=mode,
+            cost=cost, sheet=sheet, created_by=user)
+        return {"study": study, "mode": mode, "cost": cost, "round": ctx["round"],
+                "sheet": sheet, "budget": self.research_budget(team)}
+
+    def research_history(self, team: models.Team) -> list:
+        return [{"round": c.round, "study": c.study, "mode": c.mode, "cost": c.cost, "sheet": c.sheet}
+                for c in self.game.research.filter(team=team).order_by("-created_at")]
+
+    # ---- forecast loop (Group C) ----
+    def submit_forecast(self, rnd: int, team: models.Team, metric: str, predicted: float,
+                        note: str = "", user=None) -> dict:
+        if metric not in ("own_share", "growth_share"):
+            raise ValidationError({"metric": "must be 'own_share' or 'growth_share'"})
+        obj, _ = models.Forecast.objects.update_or_create(
+            game=self.game, round=rnd, team=team,
+            defaults={"metric": metric, "predicted": float(predicted), "note": note, "created_by": user})
+        return {"round": rnd, "metric": obj.metric, "predicted": obj.predicted}
+
+    def _score_forecasts(self, rnd: int) -> None:
+        rec = self.result_for(rnd)
+        if not rec:
+            return
+        firms = rec.get("firms") or {}
+        for fc in self.game.forecasts.filter(round=rnd, actual__isnull=True).select_related("team"):
+            firm = firms.get(fc.team.name)
+            if not firm:
+                continue
+            share = float(firm.get("total_market_share", 0.0) if fc.metric == "own_share"
+                          else firm.get("growth_segment_share", 0.0))
+            actual = share * 100.0  # percent, matching the student's entry
+            denom = max(abs(actual), 5.0)
+            fc.actual = actual
+            fc.accuracy = max(0.0, 1.0 - abs(fc.predicted - actual) / denom)
+            fc.save(update_fields=["actual", "accuracy"])
+
+    def forecasts_for(self, team: models.Team) -> dict:
+        rows = [{"round": f.round, "metric": f.metric, "predicted": f.predicted,
+                 "actual": f.actual, "accuracy": f.accuracy, "note": f.note}
+                for f in self.game.forecasts.filter(team=team).order_by("round")]
+        scored = [r["accuracy"] for r in rows if r["accuracy"] is not None]
+        avg = round(sum(scored) / len(scored), 3) if scored else None
+        return {"rows": rows, "avg_accuracy": avg}
+
     def _ensure_result(self, rnd: int) -> dict:
         """Return round `rnd`'s result, computing & storing it on demand WITHOUT advancing
         the game or locking the round. Used by focus groups / advisors (including the
@@ -251,7 +458,7 @@ class GameService:
         if rec is not None:
             return rec
         names = self.team_names()
-        history = api.run_history(names, self._submissions_through(rnd), self.config)
+        history = self._compute(rnd)
         history = self._ensure_crisis_inputs(rnd, names, history)
         for r in history[:rnd]:
             self._store_result(r)

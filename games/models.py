@@ -45,9 +45,36 @@ class Game(models.Model):
     timezone = models.CharField(max_length=64, default="UTC")
     round_pacing_days = models.PositiveIntegerField(default=7)
 
-    # Admin-created sims stay hidden from faculty until deployed. Default True so existing
-    # rows and faculty-created sims are visible; the create flow sets False for admin.
+    # Two-stage deployment:
+    #   1. Faculty deployment (admin) — `deployed`: the admin releases the sim to its faculty.
+    #   2. Student deployment (faculty) — `student_deployed`: the faculty opens it to students.
+    # A sim can only be student-deployed once it is faculty-deployed. Students see it only
+    # when student-deployed; faculty see it once faculty-deployed.
     deployed = models.BooleanField(default=True)
+    deployed_at = models.DateTimeField(null=True, blank=True)          # faculty deployment
+    student_deployed = models.BooleanField(default=False)
+    student_deployed_at = models.DateTimeField(null=True, blank=True)  # student deployment
+
+    # Per-round schedule [{round, opens, due}] (ISO dates), built at creation from
+    # start_date + round_pacing_days. Faculty can extend a round, shifting later rounds.
+    schedule = models.JSONField(default=list, blank=True)
+
+    # Self-registration link token: students who open /join/<token> enroll in this sim.
+    join_token = models.CharField(max_length=64, blank=True, default="")
+
+    # Faculty's private teaching note for this cohort (debrief prompts, reminders…).
+    teaching_note = models.TextField(blank=True, default="")
+
+    # Cohort shape: the expected team size.
+    students_per_team = models.PositiveIntegerField(default=4)
+
+    # Billing: real-money workspace charges. price_per_student is the seat price charged
+    # per enrolled student; seats_paid is how many of those seats an instructor has marked
+    # paid (drives "Received"). advisor_rate_per_hour prices advisor chat per started hour
+    # (0 = advisors included, no charge). Advisor hours are counted from actual records.
+    price_per_student = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    seats_paid = models.PositiveIntegerField(default=0)
+    advisor_rate_per_hour = models.DecimalField(max_digits=8, decimal_places=2, default=0)
 
     class Meta:
         ordering = ["-created_at"]
@@ -69,6 +96,47 @@ class Team(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} @ {self.game_id}"
+
+
+class Enrollment(models.Model):
+    """A student enrolled in a sim. Enrollment is separate from firm placement: an
+    enrolled student may be awaiting placement (no team) or placed (on a Team)."""
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="enrollments")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="enrollments")
+    is_test = models.BooleanField(default=False)  # provisioned test account
+    paid = models.BooleanField(default=False)     # seat marked paid by faculty
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("game", "user")
+        ordering = ["created_at"]
+
+
+class InviteStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    ACCEPTED = "accepted", "Accepted"
+
+
+class Invitation(models.Model):
+    """An emailed / link invite for a student to join a sim. Accepting one enrolls the
+    student. The self-registration link uses the game's join_token instead of a row here."""
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="invitations")
+    email = models.EmailField()
+    token = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=16, choices=InviteStatus.choices, default=InviteStatus.PENDING)
+    emailed = models.BooleanField(default=False)
+    emailed_at = models.DateTimeField(null=True, blank=True)
+    accepted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                    null=True, blank=True, related_name="+")
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("game", "email")
+        ordering = ["created_at"]
 
 
 class RoundSubmission(models.Model):
@@ -185,3 +253,44 @@ class GradeCache(models.Model):
     prose_dimensions = models.JSONField(default=dict)
     prose_overall = models.FloatField(default=0.0)
     justification = models.TextField(blank=True, default="")
+
+
+class ResearchCommission(models.Model):
+    """A commissioned market-research study (Group C). Stated studies are cheap and carry the
+    say-do bias; behavioral studies cost more and render the truth. Cost is debited from the
+    team's research budget. The rendered sheet is re-derivable from state, so only the
+    commission (what was bought, at what cost) is stored."""
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="research")
+    round = models.PositiveIntegerField()
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="research")
+    study = models.CharField(max_length=64)
+    mode = models.CharField(max_length=16)  # "stated" | "behavioral"
+    cost = models.FloatField(default=0.0)
+    sheet = models.JSONField(default=dict)   # rendered at commission time
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class Forecast(models.Model):
+    """A team's per-round prediction of a key outcome (Group C forecast loop). Accuracy is
+    scored when the round closes and folds into the board-defense grade."""
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="forecasts")
+    round = models.PositiveIntegerField()
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="forecasts")
+    metric = models.CharField(max_length=32, default="own_share")   # own_share | growth_share
+    predicted = models.FloatField()
+    actual = models.FloatField(null=True, blank=True)
+    accuracy = models.FloatField(null=True, blank=True)  # 0..1, scored on close
+    note = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True)
+
+    class Meta:
+        unique_together = ("game", "round", "team")
+        ordering = ["round"]

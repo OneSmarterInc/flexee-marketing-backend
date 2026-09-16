@@ -82,3 +82,21 @@ class SetRoleView(APIView):
         user.role = role
         user.save(update_fields=["role"])
         return Response(UserSerializer(user).data)
+
+
+class DeleteUserView(APIView):
+    """Admin-only: permanently remove a faculty or student account. Admins cannot be
+    deleted here (nor can you delete yourself) — that guards the platform's operators."""
+
+    permission_classes = [IsAdmin]
+
+    def delete(self, request, username):
+        user = User.objects.filter(username=username).first()
+        if not user:
+            raise ValidationError({"username": "unknown user"})
+        if user.id == request.user.id:
+            raise ValidationError({"detail": "You can't delete your own account."})
+        if user.role == Role.ADMIN:
+            raise ValidationError({"detail": "Admin accounts can't be deleted here."})
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

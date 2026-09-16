@@ -59,6 +59,8 @@ def run_game(
     crisis_params: CrisisParams = DEFAULT_CRISIS_PARAMS,
     promotion_params: PromotionParams = DEFAULT_PROMOTION_PARAMS,
     crisis_inputs: CrisisInputs | None = None,
+    team_reach_by_round: Sequence[Mapping[str, Mapping[str, float]]] | None = None,
+    team_message_fit_by_round: Sequence[Mapping[str, Mapping[str, float]]] | None = None,
 ) -> GameHistory:
     """Run the integrated state loop for equity, crisis scarring, and promotion.
 
@@ -168,6 +170,8 @@ def run_game(
             round_params,
             team_attribute_overrides=attribute_state,
             team_deal_conditioning=entering_dc,
+            team_reach=(team_reach_by_round[round_number - 1] if team_reach_by_round else None),
+            team_message_fit=(team_message_fit_by_round[round_number - 1] if team_message_fit_by_round else None),
         )
         scorecard = compute_scorecard(round_firms)
 

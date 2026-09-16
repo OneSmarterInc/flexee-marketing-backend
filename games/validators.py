@@ -14,9 +14,16 @@ LEVER_FIELDS = {
     "positioning": ("positioning",),
     "promotion": ("promotion",),
     "price": ("price",),
+    # Group B enrichment (app-layer levers threaded into the engine via the seam)
+    "channel": ("channel",),
+    "message": ("message",),
+    "line_extension": ("line_extension",),
 }
 
 _ALL_FIELDS = {f for fields in LEVER_FIELDS.values() for f in fields}
+
+CHANNELS = ("RETAIL", "DTC", "SOCIAL")
+MESSAGES = ("NEUTRAL", "PERFORMANCE", "HERITAGE", "CLEAN_ENERGY", "COMMUNITY")
 
 
 def _num(value, field):
@@ -87,5 +94,32 @@ def validate_decision(levers: dict, open_levers: list, config: dict) -> dict:
         if not (lo <= price <= hi):
             raise ValidationError({"price": f"must be in [{lo}, {hi}]"})
         cleaned["price"] = price
+
+    # --- Group B enrichment levers ---
+    if "channel" in open_levers:
+        ch = levers.get("channel")
+        if not isinstance(ch, dict) or set(ch) != set(CHANNELS):
+            raise ValidationError({"channel": f"must set weights for {', '.join(CHANNELS)}"})
+        w = {c: _num(ch.get(c), "channel") for c in CHANNELS}
+        if any(v < 0 for v in w.values()):
+            raise ValidationError({"channel": "weights must be >= 0"})
+        if abs(sum(w.values()) - 1.0) > 1e-6:
+            raise ValidationError({"channel": "weights must sum to 1"})
+        cleaned["channel"] = w
+
+    if "message" in open_levers:
+        msg = levers.get("message")
+        if msg not in MESSAGES:
+            raise ValidationError({"message": f"must be one of {', '.join(MESSAGES)}"})
+        cleaned["message"] = msg
+
+    if "line_extension" in open_levers:
+        le = levers.get("line_extension")
+        if not isinstance(le, dict):
+            raise ValidationError({"line_extension": "must be an object"})
+        pos = _num(le.get("positioning", 90.0), "line_extension.positioning")
+        if not (0.0 <= pos <= 100.0):
+            raise ValidationError({"line_extension": "positioning must be in [0, 100]"})
+        cleaned["line_extension"] = {"launch": bool(le.get("launch", False)), "positioning": pos}
 
     return cleaned

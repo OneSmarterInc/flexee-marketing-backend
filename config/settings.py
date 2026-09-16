@@ -142,6 +142,34 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
+# --- Email + invite links ---------------------------------------------------------
+# Student invites are emailed a join link. Delivery backend is chosen by MAIL_BACKEND:
+#   mailjet -> Mailjet Send API (config.mailjet_backend, needs MAILJET_API_KEY/SECRET)
+#   smtp    -> SMTP (needs EMAIL_HOST/…)
+#   else    -> console backend, so dev/CI log the message instead of failing.
+# FRONTEND_URL builds the join link students receive.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+MAILJET_API_KEY = os.environ.get("MAILJET_API_KEY", "")
+MAILJET_API_SECRET = os.environ.get("MAILJET_API_SECRET", "")
+MAIL_FROM_ADDRESS = os.environ.get("MAIL_FROM_ADDRESS", "no-reply@flexee.local")
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Flexee")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", f"{MAIL_FROM_NAME} <{MAIL_FROM_ADDRESS}>")
+
+_MAIL_BACKEND = os.environ.get("MAIL_BACKEND", "").lower()
+if _MAIL_BACKEND == "mailjet":
+    EMAIL_BACKEND = "config.mailjet_backend.EmailBackend"
+elif _MAIL_BACKEND == "smtp" or os.environ.get("EMAIL_HOST"):
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
+    EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+    EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+    EMAIL_USE_TLS = _env_bool("EMAIL_USE_TLS", True)
+else:
+    EMAIL_BACKEND = os.environ.get(
+        "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+
 # --- Flexee engine + LLM ----------------------------------------------------------
 # The AI voice layer (personas/advisors/defense grader) is driven by a model client.
 # Defaults to Anthropic on the cheapest current model (Claude Haiku 4.5 — $1/$5 per MTok),

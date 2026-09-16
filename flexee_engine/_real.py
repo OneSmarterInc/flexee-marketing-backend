@@ -83,8 +83,10 @@ def default_config() -> dict:
     cfg.update({
         "num_rounds": getattr(fc, "num_rounds", 14),
         "takeover_round": getattr(fc, "takeover_round", 4),
-        "lever_open_round": lever_open,
-        "lever_schedule": lever_open,        # mirror for app code that reads lever_schedule
+        "lever_open_round": lever_open,      # ENGINE levers only (faculty validates these keys)
+        # App-layer schedule incl. Group B enrichment levers (engine never sees these keys).
+        "lever_schedule": {**lever_open, "channel": 5, "message": 6, "line_extension": 7},
+        "extra_lever_open_round": {"channel": 5, "message": 6, "line_extension": 7},
         "baseline_decision": baseline,
         "round_budget": budget,
         "crisis_round": 9,
@@ -99,13 +101,20 @@ def open_levers_for_round(rnd: int, config: dict) -> list[str]:
     return list(faculty.open_levers_for_round(rnd, _faculty_config(config)))
 
 
-def run_history(team_names, submissions_by_round, config) -> list[dict]:
+def run_history(team_names, submissions_by_round, config,
+                team_channel_by_round=None, team_message_by_round=None) -> list[dict]:
     subs = [{t: (row.get(t) or {}) for t in team_names} for row in submissions_by_round]
+    group_b = {}
+    if team_channel_by_round:
+        group_b["team_channel_by_round"] = team_channel_by_round
+    if team_message_by_round:
+        group_b["team_message_by_round"] = team_message_by_round
     result = run_game_with_faculty(
         list(team_names), subs, _faculty_config(config),
         params=CALIBRATED_PARAMS, equity_params=CALIBRATED_EQUITY_PARAMS,
         promotion_params=CALIBRATED_PROMOTION_PARAMS,
         crisis_params=_crisis_params(config), crisis_inputs=config.get("crisis_inputs"),
+        **group_b,
     )
     # Shipping runner returns a list of records that already embed effective_decisions.
     # (Tuple form handled defensively in case a future build returns (history, built).)

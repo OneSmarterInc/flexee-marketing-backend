@@ -175,6 +175,8 @@ def compute_round(
     params: SimulationParams = DEFAULT_PARAMS,
     team_attribute_overrides: Mapping[str, Mapping[str, float]] | None = None,
     team_deal_conditioning: Mapping[str, float] | None = None,
+    team_reach: Mapping[str, Mapping[str, float]] | None = None,
+    team_message_fit: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, FirmResult]:
     """Compute one deterministic market-share round for teams plus backdrop firms."""
     _validate_pricing_params(params)
@@ -231,6 +233,8 @@ def compute_round(
                 effective_prices[firm_name],
                 promotion_by_firm[firm_name],
                 deal_conditioning_by_firm[firm_name],
+                reach_mult=((team_reach or {}).get(firm_name) or {}).get(segment.name, 1.0),
+                message_bonus=((team_message_fit or {}).get(firm_name) or {}).get(segment.name, 0.0),
             )
             for segment_index, segment in enumerate(params.segments)
         }
@@ -495,6 +499,8 @@ def _perception(
     price: float,
     promotion_depth: float = 0.0,
     entering_dc: float = 0.0,
+    reach_mult: float = 1.0,
+    message_bonus: float = 0.0,
 ) -> float:
     attribute_fit = sum(
         weight * attribute
@@ -503,9 +509,12 @@ def _perception(
     positioning_fit = params.positioning_bonus_max * (
         1.0 - 2.0 * abs(firm_config.positioning - segment.positioning_ideal) / 100.0
     )
-    targeting_fit = params.targeting_bonus_coef * firm_config.emphasis[segment_index]
+    # Group B — channel mix modulates ONLY the targeting term (reach_mult defaults 1.0 =
+    # neutral); message/creative adds a per-segment perception bonus (message_bonus 0.0 =
+    # neutral). Both neutral => identical to the base engine, so the goldens hold.
+    targeting_fit = params.targeting_bonus_coef * firm_config.emphasis[segment_index] * reach_mult
     value_fit = params.value_fit_vp * _incremental_value_fit(segment, price, params)
-    base_perception = attribute_fit + positioning_fit + targeting_fit + value_fit
+    base_perception = attribute_fit + positioning_fit + targeting_fit + value_fit + message_bonus
     if promotion_depth == 0.0 and entering_dc == 0.0:
         return base_perception
     promotion_lift = params.promotion_lift * promotion_depth * segment.deal_sensitivity

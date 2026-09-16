@@ -23,7 +23,10 @@ class GameSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "created_at", "status", "current_round", "num_rounds",
                   "takeover_round", "config_snapshot", "reveal_policy", "teams",
                   "locked_rounds", "student_capacity", "start_date", "timezone",
-                  "round_pacing_days", "faculty_members", "deployed")
+                  "round_pacing_days", "faculty_members", "deployed", "deployed_at",
+                  "student_deployed", "student_deployed_at", "schedule",
+                  "students_per_team", "price_per_student",
+                  "seats_paid", "advisor_rate_per_hour")
         read_only_fields = ("created_at", "status", "current_round")
 
     def get_faculty_members(self, obj):
@@ -40,9 +43,20 @@ class FacultySetupSerializer(serializers.Serializer):
     start_date = serializers.DateField(required=False, allow_null=True)
     timezone = serializers.CharField(required=False, default="UTC")
     round_pacing_days = serializers.IntegerField(required=False, default=7, min_value=1)
+    students_per_team = serializers.IntegerField(required=False, default=4, min_value=1)
+    price_per_student = serializers.DecimalField(max_digits=8, decimal_places=2,
+                                                 required=False, default=0, min_value=0)
+    advisor_rate_per_hour = serializers.DecimalField(max_digits=8, decimal_places=2,
+                                                     required=False, default=0, min_value=0)
     faculty_usernames = serializers.ListField(
         child=serializers.CharField(), required=False, default=list)
-    # optional advanced knobs (not in the default form)
+    # faculty config (A1) — all default to the calibrated values, so omitting them
+    # reproduces the shipped config byte-for-byte.
+    num_rounds = serializers.IntegerField(required=False, min_value=10, max_value=14)
+    takeover_round = serializers.IntegerField(required=False, min_value=1, max_value=14)
+    crisis_round = serializers.IntegerField(required=False, min_value=1, max_value=14)
+    crisis_damage_base = serializers.FloatField(required=False, min_value=0)
+    lever_open_round = serializers.DictField(required=False)
     scorecard_weights = serializers.DictField(required=False)
     engagement_cap_per_round = serializers.IntegerField(required=False, min_value=1)
     crisis_inputs = serializers.DictField(required=False)

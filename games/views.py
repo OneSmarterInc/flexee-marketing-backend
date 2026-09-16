@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
+from django.utils import timezone as dj_timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -16,6 +17,41 @@ from .permissions import IsAdmin, IsFaculty, can_act_for_team, team_for_user
 from .services import GameService
 
 log = logging.getLogger("flexee.views")
+
+
+# --- Public: student self-registration via invite / join link ---------------------
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def join(request, token):
+    from rest_framework.authtoken.models import Token
+    from accounts.serializers import UserSerializer
+    from .setup import resolve_join, accept_join
+
+    game, inv = resolve_join(token)
+    if not game:
+        return Response({"detail": "This invite link is invalid or has expired."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response({
+            "game_name": game.name,
+            "email": inv.email if inv else None,
+            "email_locked": bool(inv),
+        })
+
+    try:
+        user, _ = accept_join(
+            token,
+            email=request.data.get("email", ""),
+            password=request.data.get("password", ""),
+            first=request.data.get("first_name", ""),
+            last=request.data.get("last_name", ""),
+        )
+    except ValueError as e:
+        raise ValidationError({"detail": str(e)})
+    tok, _ = Token.objects.get_or_create(user=user)
+    return Response({"token": tok.key, "user": UserSerializer(user).data,
+                     "game_id": game.id}, status=status.HTTP_201_CREATED)
 
 
 # --- Reference / health (no game context) -----------------------------------------
@@ -58,7 +94,8 @@ class GameViewSet(viewsets.ModelViewSet):
             # faculty only see sims that have been deployed to them
             return qs.filter(deployed=True).filter(
                 Q(faculty=user) | Q(faculty_members=user)).distinct()
-        return qs.filter(deployed=True, teams__users=user).distinct()
+        # students only see a sim once faculty have deployed it to students
+        return qs.filter(student_deployed=True, teams__users=user).distinct()
 
     def destroy(self, request, *args, **kwargs):
         # Deleting a sim is admin-only (cascades to teams, submissions, results…).
@@ -92,10 +129,21 @@ class GameViewSet(viewsets.ModelViewSet):
         s.is_valid(raise_exception=True)
         data = s.validated_data
 
-        # v1 fixes rounds=14 and takeover=4 (calibrated config is tuned to them).
-        NUM_ROUNDS, TAKEOVER = 14, 4
+        # Faculty config (A1). Each knob defaults to the calibrated value, so a sim created
+        # with the defaults reproduces the shipped config exactly (goldens hold).
         config = api.default_config()
+        NUM_ROUNDS = int(data.get("num_rounds", config.get("num_rounds", 14)))
+        TAKEOVER = int(data.get("takeover_round", config.get("takeover_round", 4)))
         config.update({"num_rounds": NUM_ROUNDS, "takeover_round": TAKEOVER})
+        if "crisis_round" in data:
+            config["crisis_round"] = int(data["crisis_round"])
+        if "crisis_damage_base" in data:
+            config["crisis_damage_base"] = float(data["crisis_damage_base"])
+        if data.get("lever_open_round"):
+            lor = {**config.get("lever_open_round", {}), **data["lever_open_round"]}
+            config["lever_open_round"] = lor
+            # keep the combined lever_schedule (base levers + Group B extras) consistent
+            config["lever_schedule"] = {**lor, **config.get("extra_lever_open_round", {})}
         if data.get("scorecard_weights"):
             config["scorecard_weights"] = data["scorecard_weights"]
         if "engagement_cap_per_round" in data:
@@ -113,15 +161,26 @@ class GameViewSet(viewsets.ModelViewSet):
             if u and u.is_faculty:
                 assigned.add(u)
 
+        from .schedule import build_schedule
+        pacing = data.get("round_pacing_days", 7)
+        # No start date given → the sim starts today, so it always gets a real schedule
+        # instead of sitting undated until faculty sets one.
+        start_date = data.get("start_date") or dj_timezone.localdate()
+        schedule = build_schedule(start_date, pacing, NUM_ROUNDS)
+
         with transaction.atomic():
             game = models.Game.objects.create(
                 name=data["name"], num_rounds=NUM_ROUNDS, takeover_round=TAKEOVER,
                 config_snapshot=config, reveal_policy=reveal_policy, faculty=request.user,
                 status=models.GameStatus.SETUP,
                 student_capacity=data.get("student_capacity", 0),
-                start_date=data.get("start_date"),
+                start_date=start_date,
                 timezone=data.get("timezone", "UTC"),
-                round_pacing_days=data.get("round_pacing_days", 7),
+                round_pacing_days=pacing,
+                schedule=schedule,
+                students_per_team=data.get("students_per_team", 4),
+                price_per_student=data.get("price_per_student", 0),
+                advisor_rate_per_hour=data.get("advisor_rate_per_hour", 0),
                 # sims start as a draft; the admin deploys them to faculty.
                 deployed=False,
             )
@@ -167,6 +226,11 @@ class GameViewSet(viewsets.ModelViewSet):
         return Response({"me": me.username, "faculty": sorted(by_user.values(),
                                                               key=lambda r: r["username"])})
 
+    @action(detail=False, methods=["get"], permission_classes=[IsAdmin])
+    def billing(self, request):
+        from .billing import compute_billing
+        return Response(compute_billing(models.Game.objects.all()))
+
     # ---- state summary (student or faculty) ----
     @action(detail=True, methods=["get"])
     def state(self, request, pk=None):
@@ -196,6 +260,51 @@ class GameViewSet(viewsets.ModelViewSet):
         for sub in subs:
             merged.update(sub.submitted_levers or {})
         return merged
+
+    # ---- Financials (read-only reporting overlay) ----
+    @action(detail=True, methods=["get"])
+    def financials(self, request, pk=None):
+        game = self.get_object()
+        svc = self._service(game)
+        team = team_for_user(game, request.user)
+        return Response({
+            "my_team": team.name if team else None,
+            "financials": svc.financials(),
+        })
+
+    # ---- Market research (Group C) ----
+    @action(detail=True, methods=["get", "post"])
+    def research(self, request, pk=None):
+        game = self.get_object()
+        svc = self._service(game)
+        team = team_for_user(game, request.user)
+        if request.method == "POST":
+            if team is None:
+                raise ValidationError({"detail": "only a team member can commission research"})
+            r = svc.commission_research(team, request.data.get("study"), request.data.get("mode"),
+                                        user=request.user)
+            return Response(r)
+        return Response({
+            "catalog": api.research_catalog(),
+            "budget": svc.research_budget(team) if team else None,
+            "history": svc.research_history(team) if team else [],
+        })
+
+    # ---- Forecast loop (Group C) ----
+    @action(detail=True, methods=["get", "post"])
+    def forecast(self, request, pk=None):
+        game = self.get_object()
+        svc = self._service(game)
+        team = team_for_user(game, request.user)
+        if request.method == "POST":
+            if team is None:
+                raise ValidationError({"detail": "only a team member can forecast"})
+            rnd = int(request.data.get("round", game.current_round))
+            r = svc.submit_forecast(rnd, team, request.data.get("metric", "own_share"),
+                                    request.data.get("predicted"), note=request.data.get("note", ""),
+                                    user=request.user)
+            return Response(r)
+        return Response(svc.forecasts_for(team) if team else {"rows": [], "avg_accuracy": None})
 
     # ---- A2: which levers are open ----
     @action(detail=True, methods=["get"], url_path="open-levers")
@@ -230,10 +339,58 @@ class GameViewSet(viewsets.ModelViewSet):
     # ---- deploy / unpublish a sim to faculty (admin only) ----
     @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
     def deploy(self, request, pk=None):
+        from django.utils import timezone
         game = self.get_object()
         game.deployed = bool(request.data.get("deployed", True))
-        game.save(update_fields=["deployed"])
-        return Response({"id": game.id, "deployed": game.deployed})
+        fields = ["deployed"]
+        if game.deployed and not game.deployed_at:
+            game.deployed_at = timezone.now()
+            fields.append("deployed_at")
+        # unpublishing to faculty also retracts it from students
+        if not game.deployed and game.student_deployed:
+            game.student_deployed = False
+            fields.append("student_deployed")
+        game.save(update_fields=fields)
+        return Response({"id": game.id, "deployed": game.deployed, "deployed_at": game.deployed_at,
+                         "student_deployed": game.student_deployed})
+
+    # ---- open / close the sim to students (faculty) ----
+    @action(detail=True, methods=["post"], url_path="student-deploy",
+            permission_classes=[IsFaculty])
+    def student_deploy(self, request, pk=None):
+        from django.utils import timezone
+        game = self.get_object()
+        want = bool(request.data.get("deployed", True))
+        if want and not game.deployed:
+            raise ValidationError({"detail": "This sim hasn't been deployed to faculty yet."})
+        game.student_deployed = want
+        fields = ["student_deployed"]
+        if want and not game.student_deployed_at:
+            game.student_deployed_at = timezone.now()
+            fields.append("student_deployed_at")
+        game.save(update_fields=fields)
+        return Response({"id": game.id, "student_deployed": game.student_deployed,
+                         "student_deployed_at": game.student_deployed_at})
+
+    # ---- extend a round's due date, shifting later rounds (faculty) ----
+    @action(detail=True, methods=["post"], url_path="extend-round",
+            permission_classes=[IsFaculty])
+    def extend_round(self, request, pk=None):
+        from datetime import date
+        from .schedule import extend_round as _extend
+        game = self.get_object()
+        try:
+            round_no = int(request.data.get("round"))
+            new_due = date.fromisoformat(str(request.data.get("due")))
+        except (TypeError, ValueError):
+            raise ValidationError({"detail": "Provide a round number and a due date (YYYY-MM-DD)."})
+        cascade = bool(request.data.get("cascade", True))
+        try:
+            game.schedule = _extend(game.schedule, round_no, new_due, cascade=cascade)
+        except ValueError as e:
+            raise ValidationError({"detail": str(e)})
+        game.save(update_fields=["schedule"])
+        return Response({"id": game.id, "schedule": game.schedule})
 
     # ---- reopen a locked round (faculty) ----
     @action(detail=True, methods=["post"], url_path="reopen-round",
@@ -313,11 +470,21 @@ class GameViewSet(viewsets.ModelViewSet):
         if team is None:
             raise PermissionDenied("not on a team")
         # Student sees only their own entry per round (which already carries the
-        # anonymized cohort best/avg/worst block).
-        scoped = [
-            {"round": r["round"], "own_report": r.get("teams", {}).get(team.name)}
-            for r in report
-        ]
+        # anonymized cohort best/avg/worst block). Enrich each round with the brand-tracker
+        # trajectory: the team's positioning on the heritage↔wellness axis and brand equity.
+        hist = self._service(game).history()
+        by_round = {rec["round"]: rec for rec in hist}
+        scoped = []
+        for r in report:
+            rec = by_round.get(r["round"], {})
+            firm = (rec.get("firms") or {}).get(team.name) or {}
+            dec = (rec.get("effective_decisions") or {}).get(team.name) or {}
+            scoped.append({
+                "round": r["round"],
+                "own_report": r.get("teams", {}).get(team.name),
+                "positioning": dec.get("positioning"),
+                "brand_equity": firm.get("eq"),
+            })
         return Response(scoped)
 
     # ---- A6: board defense ----
@@ -362,4 +529,164 @@ class GameViewSet(viewsets.ModelViewSet):
         from accounts.models import User
         user = get_object_or_404(User, username=request.data.get("username"))
         team.users.add(user)
+        models.Enrollment.objects.get_or_create(game=game, user=user)
         return Response({"team": team.name, "assigned": user.username})
+
+    # ---- faculty setup flow -----------------------------------------------------
+    @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
+    def setup(self, request, pk=None):
+        from .setup import setup_summary
+        return Response(setup_summary(self.get_object()))
+
+    @action(detail=True, methods=["post"], url_path="provision-test-team",
+            permission_classes=[IsFaculty])
+    def provision_test_team(self, request, pk=None):
+        from .setup import provision_test_team, setup_summary
+        game = self.get_object()
+        try:
+            result = provision_test_team(game, request.data.get("per_firm", 4))
+        except ValueError as e:
+            raise ValidationError({"detail": str(e)})
+        return Response({**result, "summary": setup_summary(game)})
+
+    @action(detail=True, methods=["get", "post"], permission_classes=[IsFaculty])
+    def invitations(self, request, pk=None):
+        from .setup import create_invitations, setup_summary
+        game = self.get_object()
+        if request.method == "POST":
+            emails = request.data.get("emails")
+            if isinstance(emails, str):
+                emails = [emails]
+            if not emails:
+                raise ValidationError({"detail": "Provide one or more email addresses."})
+            send = bool(request.data.get("send", True))
+            result = create_invitations(game, emails, send=send)
+            return Response({**result, "summary": setup_summary(game)})
+        rows = [{"id": i.id, "email": i.email, "status": i.status, "emailed": i.emailed,
+                 "created_at": i.created_at} for i in game.invitations.all()]
+        return Response({"invitations": rows})
+
+    @action(detail=True, methods=["post"], url_path="invite-link",
+            permission_classes=[IsFaculty])
+    def invite_link(self, request, pk=None):
+        from .setup import ensure_join_token, join_url
+        game = self.get_object()
+        return Response({"link": join_url(ensure_join_token(game))})
+
+    @action(detail=True, methods=["post"], url_path="add-team",
+            permission_classes=[IsFaculty])
+    def add_team(self, request, pk=None):
+        game = self.get_object()
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            n = game.teams.count() + 1
+            name = f"Team {n}"
+        if game.teams.filter(name=name).exists():
+            raise ValidationError({"detail": f"A firm named “{name}” already exists."})
+        team = models.Team.objects.create(game=game, name=name)
+        return Response({"id": team.id, "name": team.name}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="delete-team",
+            permission_classes=[IsFaculty])
+    def delete_team(self, request, pk=None):
+        game = self.get_object()
+        team = get_object_or_404(models.Team, game=game, pk=request.data.get("team_id"))
+        team.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], url_path="place-student",
+            permission_classes=[IsFaculty])
+    def place_student(self, request, pk=None):
+        """Place, move, or unplace an enrolled student. team_id null = awaiting placement."""
+        from accounts.models import User
+        from .setup import setup_summary
+        game = self.get_object()
+        user = get_object_or_404(User, pk=request.data.get("user_id"))
+        models.Enrollment.objects.get_or_create(game=game, user=user)
+        for t in game.teams.filter(users=user):
+            t.users.remove(user)
+        team_id = request.data.get("team_id")
+        if team_id:
+            team = get_object_or_404(models.Team, game=game, pk=team_id)
+            team.users.add(user)
+        return Response(setup_summary(game))
+
+    # ---- faculty sim console: overview + payment + teaching note ----------------
+    @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
+    def overview(self, request, pk=None):
+        from .setup import overview_summary
+        return Response(overview_summary(self.get_object()))
+
+    @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
+    def students(self, request, pk=None):
+        """Enrolled students with placement + payment, for the Students management view."""
+        from accounts.models import Role
+        game = self.get_object()
+        team_by_user = {}
+        for t in game.teams.all():
+            for u in t.users.all():
+                team_by_user[u.id] = t.name
+        rows = []
+        for e in game.enrollments.select_related("user"):
+            u = e.user
+            rows.append({"id": u.id, "name": (f"{u.first_name} {u.last_name}".strip() or u.username),
+                         "email": u.email or u.username, "team": team_by_user.get(u.id),
+                         "paid": e.paid, "is_test": e.is_test})
+        return Response({"students": rows})
+
+    @action(detail=True, methods=["post"], url_path="mark-paid",
+            permission_classes=[IsFaculty])
+    def mark_paid(self, request, pk=None):
+        from accounts.models import User
+        game = self.get_object()
+        enr = get_object_or_404(models.Enrollment, game=game,
+                                user=get_object_or_404(User, pk=request.data.get("user_id")))
+        enr.paid = bool(request.data.get("paid", True))
+        enr.save(update_fields=["paid"])
+        return Response({"user_id": enr.user_id, "paid": enr.paid})
+
+    @action(detail=True, methods=["post"], url_path="teaching-note",
+            permission_classes=[IsFaculty])
+    def teaching_note(self, request, pk=None):
+        game = self.get_object()
+        game.teaching_note = request.data.get("note", "")
+        game.save(update_fields=["teaching_note"])
+        return Response({"teaching_note": game.teaching_note})
+
+    @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
+    def defenses(self, request, pk=None):
+        """Read-only board-defense results per team. Defenses are auto-graded on submit."""
+        game = self.get_object()
+        graded = {d.team_id: d for d in models.DefenseSubmission.objects.filter(game=game)}
+        rows = []
+        for t in game.teams.all():
+            d = graded.get(t.id)
+            rows.append({
+                "team": t.name,
+                "defended": bool(d),
+                "combined": d.combined if d else None,
+                "graded_at": d.graded_at if d else None,
+            })
+        return Response({"defenses": rows})
+
+    @action(detail=True, methods=["post"], url_path="add-cofaculty",
+            permission_classes=[IsFaculty])
+    def add_cofaculty(self, request, pk=None):
+        from accounts.models import User
+        game = self.get_object()
+        u = get_object_or_404(User, username=request.data.get("username"))
+        if not u.is_faculty:
+            raise ValidationError({"detail": "That user isn't a faculty member."})
+        game.faculty_members.add(u)
+        return Response({"added": u.username})
+
+    @action(detail=True, methods=["post"], url_path="remove-cofaculty",
+            permission_classes=[IsFaculty])
+    def remove_cofaculty(self, request, pk=None):
+        from accounts.models import User
+        game = self.get_object()
+        u = get_object_or_404(User, username=request.data.get("username"))
+        if game.faculty_id == u.id:
+            raise ValidationError({"detail": "The sim owner can't be removed."})
+        game.faculty_members.remove(u)
+        return Response({"removed": u.username})
