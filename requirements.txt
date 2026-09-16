@@ -3,9 +3,10 @@ djangorestframework>=3.15
 django-cors-headers>=4.4
 python-dotenv>=1.0
 
-# Optional — only needed for the live LLM voice layer (personas/advisors/defense prose).
-# The default "offline" model client requires neither.
-# anthropic>=0.39
+# Live LLM voice layer (personas/advisors/defense prose) — required in production;
+# the "offline" model client (no key needed) is a dev/CI fallback only. Pinned exact
+# (not >=) after a newer resolved release broke Messages.create(temperature=...) in prod.
+anthropic==0.121.0
 # openai>=1.50
 
 # Optional — production database driver.

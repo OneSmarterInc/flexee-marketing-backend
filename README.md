@@ -32,7 +32,7 @@ hand. The AI never moves a number — it renders the deterministic state.
 The verified engine now lives in `flexee_engine/vendor/` (18 modules + `flexee_calibrated_config`),
 so `flexee_engine.api.ENGINE_MODE == "real"` and the app runs on the **calibrated engine**
 (full engine suite: 731 green). If the vendor modules are removed, `api.py` falls back to a
-deterministic **dev stub** in the same contract shapes. `GET /api/health/` reports which is
+deterministic **dev stub** in the same contract shapes. `GET /meridian/api/health/` reports which is
 active (`"engine_mode": "real" | "stub"`).
 
 ### Shipping signatures the adapter handles (differ from the reference `flexee_service.py`)
@@ -99,7 +99,7 @@ python manage.py seed_demo                # faculty + 4 teams + students
 python manage.py runserver
 ```
 
-Then check `http://127.0.0.1:8000/api/health/`.
+Then check `http://127.0.0.1:8000/meridian/api/health/`.
 
 Demo credentials (from `seed_demo`): faculty `faculty` / `facultypass123`; students
 `student_a`..`student_d` / `studentpass123`.
@@ -109,35 +109,35 @@ Demo credentials (from `seed_demo`): faculty `faculty` / `facultypass123`; stude
 Token auth (also session auth for the browsable API). Get a token:
 
 ```bash
-curl -X POST localhost:8000/api/auth/login/ -H 'Content-Type: application/json' \
+curl -X POST localhost:8000/meridian/api/auth/login/ -H 'Content-Type: application/json' \
   -d '{"username":"faculty","password":"facultypass123"}'
 # -> {"token": "...", "user": {...}}
 ```
 
-Send it as `Authorization: Token <token>` on every `/api/...` call. Roles: **faculty**
+Send it as `Authorization: Token <token>` on every `/meridian/api/...` call. Roles: **faculty**
 (configure/steer, see everything) vs **student** (play one team, student-safe output only).
 
 ## API surface (maps to the screen contracts)
 
 | Screen | Method & path | Who |
 |---|---|---|
-| Health / engine mode | `GET /api/health/` | anyone |
-| Persona pool (id+name only) | `GET /api/reference/personas/` | auth |
-| Advisor roster | `GET /api/reference/advisors/` | auth |
-| Default config | `GET /api/reference/default-config/` | auth |
-| A1 Faculty setup | `POST /api/games/` | faculty |
-| List / detail | `GET /api/games/`, `GET /api/games/{id}/` | scoped |
-| State summary | `GET /api/games/{id}/state/` | member |
-| A2 Open levers | `GET /api/games/{id}/open-levers/?round=` | member |
-| A2 Submit decision | `POST /api/games/{id}/submit/` | student(own)/faculty |
-| A2 Close round | `POST /api/games/{id}/close-round/` | faculty |
-| A2 Round result | `GET /api/games/{id}/results/?round=` | scoped |
-| A3 Focus group | `POST /api/games/{id}/focus-group/` | student(own)/faculty |
-| A4 Advisor panel | `POST /api/games/{id}/advisors/` | student(own)/faculty |
-| A5 Scorecard | `GET /api/games/{id}/scorecard/` | scoped |
-| A6 Board defense | `POST /api/games/{id}/defense/` | student(own)/faculty |
-| A7 Faculty dashboard | `GET /api/games/{id}/dashboard/` | faculty |
-| Roster: assign student | `POST /api/games/{id}/assign-student/` | faculty |
+| Health / engine mode | `GET /meridian/api/health/` | anyone |
+| Persona pool (id+name only) | `GET /meridian/api/reference/personas/` | auth |
+| Advisor roster | `GET /meridian/api/reference/advisors/` | auth |
+| Default config | `GET /meridian/api/reference/default-config/` | auth |
+| A1 Faculty setup | `POST /meridian/api/games/` | faculty |
+| List / detail | `GET /meridian/api/games/`, `GET /meridian/api/games/{id}/` | scoped |
+| State summary | `GET /meridian/api/games/{id}/state/` | member |
+| A2 Open levers | `GET /meridian/api/games/{id}/open-levers/?round=` | member |
+| A2 Submit decision | `POST /meridian/api/games/{id}/submit/` | student(own)/faculty |
+| A2 Close round | `POST /meridian/api/games/{id}/close-round/` | faculty |
+| A2 Round result | `GET /meridian/api/games/{id}/results/?round=` | scoped |
+| A3 Focus group | `POST /meridian/api/games/{id}/focus-group/` | student(own)/faculty |
+| A4 Advisor panel | `POST /meridian/api/games/{id}/advisors/` | student(own)/faculty |
+| A5 Scorecard | `GET /meridian/api/games/{id}/scorecard/` | scoped |
+| A6 Board defense | `POST /meridian/api/games/{id}/defense/` | student(own)/faculty |
+| A7 Faculty dashboard | `GET /meridian/api/games/{id}/dashboard/` | faculty |
+| Roster: assign student | `POST /meridian/api/games/{id}/assign-student/` | faculty |
 
 ### Decision payload (submit)
 
@@ -209,7 +209,7 @@ cross-check implementations and the authoritative authored files:
    The backend exposes only the five levers — nothing to change.
 2. **Round lifecycle:** locks on close; faculty can reopen; missing submission = baseline
    (no extra penalty). → `Game.locked_rounds`; `submit` rejects a locked round;
-   `POST /api/games/{id}/reopen-round/` (faculty).
+   `POST /meridian/api/games/{id}/reopen-round/` (faculty).
 3. **Engagement:** faculty-set per-round **cap** (`engagement_cap_per_round`, default 3) +
    **diminishing returns** on the grade. → cap enforced in `focus_group`/`consult_advisors`;
    `engagement()` applies a saturating transform (`1 + f + f² + …`) in the **app layer**,
