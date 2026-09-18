@@ -45,6 +45,24 @@ def _retry(fn, retries: int = DEFAULT_RETRIES, base_delay: float = 0.75):
     raise RuntimeError(f"model call failed after {retries + 1} attempts: {last}") from last
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Models often wrap a response in a ```json ... ``` (or bare ``` ... ```) fence even
+    when the prompt says "no prose outside the JSON" — a well-documented quirk, not a
+    provider bug. Left alone, the grader's json.loads() fails on the fence characters with
+    "model_client must return valid JSON". Strip one leading/trailing fence if present;
+    plain prose (no fence) passes through unchanged."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return stripped
+    body = stripped[first_newline + 1:].rstrip()
+    if body.endswith("```"):
+        body = body[:-3]
+    return body.strip()
+
+
 class AnthropicModelClient:
     """Adapter for Anthropic's Messages API."""
 
@@ -67,7 +85,8 @@ class AnthropicModelClient:
                 temperature=temperature,
             )
             # concatenate any text blocks
-            return "".join(getattr(b, "text", "") for b in resp.content).strip()
+            text = "".join(getattr(b, "text", "") for b in resp.content).strip()
+            return _strip_markdown_fence(text)
         return _retry(_do)
 
 
@@ -91,7 +110,7 @@ class OpenAIModelClient:
                 max_tokens=self._max_tokens,
                 temperature=temperature,
             )
-            return (resp.choices[0].message.content or "").strip()
+            return _strip_markdown_fence(resp.choices[0].message.content or "")
         return _retry(_do)
 
 

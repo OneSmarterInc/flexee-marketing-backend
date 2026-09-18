@@ -130,6 +130,7 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "EXCEPTION_HANDLER": "config.exceptions.api_exception_handler",
     "PAGE_SIZE": 50,
 }
 

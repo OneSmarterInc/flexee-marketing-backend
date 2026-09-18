@@ -207,6 +207,11 @@ def overview_summary(game) -> dict:
     paid = sum(1 for e in enrollments if e.paid)
     paid_by_user = {e.user_id: e.paid for e in enrollments}
 
+    cur = game.current_round or 1
+    from .services import GameService  # local import: avoid a module-load cycle with services.py
+    decisions_open = bool(GameService(game).open_levers(cur))
+    submitted_team_ids = set(game.submissions.filter(round=cur).values_list("team_id", flat=True))
+
     placed_ids = set()
     firms = []
     for t in game.teams.all():
@@ -217,13 +222,13 @@ def overview_summary(game) -> dict:
             "id": t.id, "name": t.name,
             "members": len(members),
             "paid": sum(1 for u in members if paid_by_user.get(u.id)),
+            "submitted_current_round": t.id in submitted_team_ids,
         })
     in_firms = len(placed_ids)
 
     # board defenses are auto-graded on submission (no manual queue); this is just a count.
     defended = models.DefenseSubmission.objects.filter(game=game).count()
 
-    cur = game.current_round or 1
     total = game.num_rounds or 14
     pct = round(min(cur - 1, total) / total * 100) if total else 0
     sched = {s["round"]: s for s in (game.schedule or [])}
@@ -245,6 +250,13 @@ def overview_summary(game) -> dict:
     if awaiting > 0:
         needs.append({"kind": "unplaced", "count": awaiting, "label": f"{awaiting} awaiting placement",
                       "detail": "Not yet assigned to a firm."})
+    not_submitted = [f["name"] for f in firms if f["members"] > 0 and not f["submitted_current_round"]]
+    if decisions_open and not_submitted:
+        needs.append({
+            "kind": "not_submitted", "count": len(not_submitted),
+            "label": f"{len(not_submitted)} firm{'s' if len(not_submitted) != 1 else ''} haven't submitted round {cur}",
+            "detail": ", ".join(not_submitted),
+        })
 
     return {
         "id": game.id,
@@ -263,7 +275,7 @@ def overview_summary(game) -> dict:
         "run": {
             "current_round": cur, "num_rounds": total, "pct": pct,
             "remaining": max(total - cur, 0), "round_due": round_due,
-            "locked_rounds": game.locked_rounds or [],
+            "locked_rounds": game.locked_rounds or [], "decisions_open": decisions_open,
         },
         "firms": firms,
         "placed": in_firms,

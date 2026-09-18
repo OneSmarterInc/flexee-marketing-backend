@@ -148,9 +148,11 @@ class GameService:
     def _submissions_through(self, t: int) -> list[dict]:
         """0-indexed list of length num_rounds (the shipping runner requires the full length).
 
-        Rounds 1..t carry the stored submissions; future rounds are empty (the runner fills
-        them from the faculty baseline). The runner is sequential/pure, so round t's result
-        is identical whether or not later rounds are padded — we publish only rounds 1..t.
+        Rounds 1..t carry the stored submissions, with any team that missed one filled in
+        with that round's cohort average (see `_fill_missing_with_cohort_average`); future
+        rounds are left empty (the runner fills them from the faculty baseline). The runner
+        is sequential/pure, so round t's result is identical whether or not later rounds are
+        padded — we publish only rounds 1..t.
         """
         names = self.team_names()
         n = max(t, self._num_rounds())
@@ -161,7 +163,36 @@ class GameService:
                 lv = sub.submitted_levers or {}
                 # Only engine decision fields reach the runner (Group B levers are app-layer).
                 rows[sub.round - 1][sub.team.name] = {k: lv[k] for k in ENGINE_DECISION_FIELDS if k in lv}
+        self._fill_missing_with_cohort_average(rows[:t])
         return rows
+
+    @staticmethod
+    def _fill_missing_with_cohort_average(played_rows: list[dict]) -> None:
+        """A team that misses a round's submission entirely gets that round's COHORT
+        AVERAGE (mean of every field the submitting teams actually set) instead of a hard
+        reset to the fixed engine baseline — a missed round should track the class's
+        median strategy, not an unrelated fixed number, so it's neither a free pass nor an
+        unfair penalty. Mutates the round dicts in place; skips a round if nobody submitted
+        (listening period, or everyone missed it) since there's nothing to average.
+        """
+        for round_row in played_rows:
+            submitted = [dec for dec in round_row.values() if dec]
+            missing_teams = [team for team, dec in round_row.items() if not dec]
+            if not submitted or not missing_teams:
+                continue
+            avg: dict = {}
+            for field in ENGINE_DECISION_FIELDS:
+                if field == "emphasis":
+                    continue
+                values = [dec[field] for dec in submitted if field in dec]
+                if values:
+                    avg[field] = sum(values) / len(values)
+            emphasis_lists = [dec["emphasis"] for dec in submitted if "emphasis" in dec]
+            if emphasis_lists:
+                avg["emphasis"] = [sum(v[i] for v in emphasis_lists) / len(emphasis_lists)
+                                   for i in range(len(emphasis_lists[0]))]
+            for team in missing_teams:
+                round_row[team] = avg
 
     # ---- Group B: app-layer channel/message maps + line-extension state ----
     def _group_b_maps(self, t: int):
@@ -250,6 +281,7 @@ class GameService:
             self._store_result(rec)
 
         self._advance_relationships(history[rnd - 1])
+        self._carry_forward_forecasts(rnd)  # a team that skipped this round's forecast repeats its last one
         self._score_forecasts(rnd)  # Group C: grade this round's predictions against the result
 
         self.game.current_round = min(rnd + 1, self.game.num_rounds)
@@ -423,6 +455,22 @@ class GameService:
             game=self.game, round=rnd, team=team,
             defaults={"metric": metric, "predicted": float(predicted), "note": note, "created_by": user})
         return {"round": rnd, "metric": obj.metric, "predicted": obj.predicted}
+
+    def _carry_forward_forecasts(self, rnd: int) -> None:
+        """A team that never called submit_forecast for this round gets its most recent
+        prior forecast (same metric/predicted) copied forward, so a missed forecast still
+        gets scored against this round's real outcome instead of silently vanishing."""
+        already = set(self.game.forecasts.filter(round=rnd).values_list("team_id", flat=True))
+        for team in self.game.teams.all():
+            if team.id in already:
+                continue
+            prior = self.game.forecasts.filter(team=team, round__lt=rnd).order_by("-round").first()
+            if prior is None:
+                continue
+            models.Forecast.objects.create(
+                game=self.game, round=rnd, team=team, metric=prior.metric,
+                predicted=prior.predicted, note=prior.note,
+            )
 
     def _score_forecasts(self, rnd: int) -> None:
         rec = self.result_for(rnd)

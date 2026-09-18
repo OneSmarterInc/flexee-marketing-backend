@@ -664,6 +664,7 @@ class GameViewSet(viewsets.ModelViewSet):
             rows.append({
                 "team": t.name,
                 "defended": bool(d),
+                "defense_text": d.defense_text if d else None,
                 "combined": d.combined if d else None,
                 "graded_at": d.graded_at if d else None,
             })
