@@ -16,6 +16,13 @@ from rest_framework.exceptions import ValidationError
 
 from flexee_engine import api
 from . import models
+from .enrichment_overlay import (
+    LINE_EXT_CARRY_COST,
+    LINE_EXT_LAUNCH_COST,
+    apply_line_extension,
+    crisis_inputs_with_line_extension,
+    student_research_sheet,
+)
 from .validators import validate_decision
 
 log = logging.getLogger("flexee.service")
@@ -221,50 +228,36 @@ class GameService:
                 info[sub.team.name] = {"launch_round": sub.round, "positioning": float(le.get("positioning", 90.0))}
         return info
 
-    def _apply_line_extension(self, history: list) -> list:
-        """Overlay the functional line's net volume onto each record (incremental −
-        cannibalization), recomputing revenue/contribution. App-layer; the engine is untouched."""
-        info = self._line_ext_info(self._num_rounds())
-        if not info:
-            return history
-        budget = float(self.config.get("round_budget", 10.0))
-        for rec in history:
-            firms = rec.get("firms") or {}
-            sizes = rec.get("segment_sizes") or {}
-            eff = rec.get("effective_decisions") or {}
-            for team, li in info.items():
-                firm = firms.get(team)
-                if not firm:
-                    continue
-                state = {"launched": True, "launch_round": li["launch_round"],
-                         "current_round": rec["round"], "positioning": li["positioning"]}
-                ext = api.line_extension_effect(state, firm.get("volume") or {}, sizes,
-                                                float(eff.get(team, {}).get("positioning", 35.0)))
-                if not ext.get("live"):
-                    continue
-                orig = float(firm.get("total_volume") or 0.0)
-                new_vol = orig + float(ext["net_total"])
-                price = float(firm.get("price") or 0.0)
-                per_unit = ((float(firm.get("contribution") or 0.0)) + budget) / orig if orig else 0.0
-                firm["total_volume"] = new_vol
-                firm["revenue"] = new_vol * price
-                firm["contribution"] = per_unit * new_vol - budget
-                firm["line_extension"] = {
-                    "net_total": ext["net_total"], "rounds_live": ext["rounds_live"],
-                    "incremental": ext["incremental_by_segment"],
-                    "cannibalized": ext["cannibalized_by_segment"],
-                    "crisis_response_credit": ext["crisis_response_credit"],
-                }
-        return history
+    def _apply_line_extension(self, history: list, info: dict | None = None) -> list:
+        """Overlay the functional line onto each record: net volume per segment, launch and
+        carry costs, refreshed shares and a recomputed scorecard (see enrichment_overlay).
+        App-layer; the engine is untouched, and a game with no launch is returned as-is."""
+        if info is None:
+            info = self._line_ext_info(self._num_rounds())
+        return apply_line_extension(
+            history, info,
+            budget=float(self.config.get("round_budget", 10.0)),
+            launch_cost=float(self.config.get("line_extension_launch_cost", LINE_EXT_LAUNCH_COST)),
+            carry_cost=float(self.config.get("line_extension_carry_cost", LINE_EXT_CARRY_COST)),
+        )
 
     def _compute(self, rnd: int) -> list:
         """Single compute path: engine run with Group B channel/message threaded in, then the
-        line-extension overlay. Used everywhere history is (re-)derived."""
+        line-extension overlay. Used everywhere history is (re-)derived.
+
+        When crisis inputs exist (derived or faculty-authored), each launched team's line
+        extension credit is folded into its crisis `response` for THIS run only. The stored
+        config keeps the unadjusted inputs, so re-deriving never compounds the credit."""
         names = self.team_names()
         ch, msg = self._group_b_maps(rnd)
-        history = api.run_history(names, self._submissions_through(rnd), self.config,
+        info = self._line_ext_info(self._num_rounds())
+        cfg = self.config
+        if info and cfg.get("crisis_inputs"):
+            cfg = {**cfg, "crisis_inputs": crisis_inputs_with_line_extension(
+                cfg["crisis_inputs"], info, int(cfg.get("crisis_round", 9)))}
+        history = api.run_history(names, self._submissions_through(rnd), cfg,
                                   team_channel_by_round=ch, team_message_by_round=msg)
-        return self._apply_line_extension(history)
+        return self._apply_line_extension(history, info)
 
     # ---- round close: pure re-derivation ----
     @transaction.atomic
@@ -382,11 +375,14 @@ class GameService:
                 rev = float(firm.get("revenue", 0.0))
                 tv = float(firm.get("total_volume", 0.0))
                 promo = float(firm.get("promotion", 0.0))
+                # The line extension's launch/carry cost is launch marketing: expensed with
+                # performance spend so the accounts show that the functional line cost money.
+                le_cost = float((firm.get("line_extension") or {}).get("cost", 0.0))
                 mkts.append({
                     "gross_revenue": str(round(rev * scale, 4)),
                     "promo_allow": str(round(tv * promo_rate * promo * scale, 4)),
                     "brand_spend": str(round(float(dec.get("brand", 0.0)) * scale, 4)),
-                    "perf_spend": str(round(float(dec.get("perf", 0.0)) * scale, 4)),
+                    "perf_spend": str(round((float(dec.get("perf", 0.0)) + le_cost) * scale, 4)),
                     "research_spend": str(round(float(dec.get("research", 0.0)) * scale, 4)),
                 })
             out[t] = api.financials_statements(mkts)
@@ -415,8 +411,12 @@ class GameService:
 
     _WHERE_TO_GROW_COST = {"stated": 3.0, "behavioral": 6.0}
 
+    @transaction.atomic
     def commission_research(self, team: models.Team, study: str, mode: str, user=None) -> dict:
         import research as r
+        # Serialize commissions per team so two concurrent requests cannot both pass the
+        # budget check and overspend (select_for_update is a no-op on SQLite, real on Postgres).
+        models.Team.objects.select_for_update().get(pk=team.pk)
         if mode not in ("stated", "behavioral"):
             raise ValidationError({"mode": "must be 'stated' or 'behavioral'"})
         ctx = self._research_ctx(team.name)
@@ -436,14 +436,17 @@ class GameService:
             sheet = {"ranking": api.where_to_grow(ctx, mode)}
         else:
             sheet = api.render_study(study, mode, ctx)
+        # The full sheet (with engine truth) is stored for faculty/audit; students only ever
+        # receive the reported values — otherwise a cheap stated study leaks behavioral truth.
         models.ResearchCommission.objects.create(
             game=self.game, round=ctx["round"], team=team, study=study, mode=mode,
             cost=cost, sheet=sheet, created_by=user)
         return {"study": study, "mode": mode, "cost": cost, "round": ctx["round"],
-                "sheet": sheet, "budget": self.research_budget(team)}
+                "sheet": student_research_sheet(sheet), "budget": self.research_budget(team)}
 
     def research_history(self, team: models.Team) -> list:
-        return [{"round": c.round, "study": c.study, "mode": c.mode, "cost": c.cost, "sheet": c.sheet}
+        return [{"round": c.round, "study": c.study, "mode": c.mode, "cost": c.cost,
+                 "sheet": student_research_sheet(c.sheet)}
                 for c in self.game.research.filter(team=team).order_by("-created_at")]
 
     # ---- forecast loop (Group C) ----

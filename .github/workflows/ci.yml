@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      FLEXEE_LLM_PROVIDER: offline   # deterministic voice client; no API key or network
+      DJANGO_SECRET_KEY: ci-only-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # Integrity guard + vendored goldens + enrichment overlay tests (no Django needed).
+      - run: python -m pytest
+      - run: python manage.py check
+      # Fails if a model change was committed without its migration.
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py test

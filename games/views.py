@@ -419,13 +419,20 @@ class GameViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("not on a team")
         return Response(self._student_result_view(rec, team.name))
 
-    @staticmethod
-    def _student_result_view(rec, team_name):
+    # Engine internals a student never needs: raw perception is the input to revealed
+    # (true) warmth, so it stays server-side. Outcomes (share, volume, revenue...) remain.
+    _STUDENT_HIDDEN_FIRM_FIELDS = ("perception", "attraction")
+
+    @classmethod
+    def _student_result_view(cls, rec, team_name):
+        firm = rec["firms"].get(team_name)
+        if isinstance(firm, dict):
+            firm = {k: v for k, v in firm.items() if k not in cls._STUDENT_HIDDEN_FIRM_FIELDS}
         return {
             "round": rec["round"],
             "segment_sizes": rec["segment_sizes"],
             "open_levers": rec["open_levers"],
-            "firm": rec["firms"].get(team_name),
+            "firm": firm,
             "scorecard": rec["scorecard"]["firms"].get(team_name),
             "equity": rec["equity"].get(team_name),
             "attribute_state": rec["attribute_state"].get(team_name),
