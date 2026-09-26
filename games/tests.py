@@ -16,6 +16,7 @@ from accounts.models import Role, User
 from flexee_engine import api
 from . import models
 from .services import GameService, apply_scorecard_weights
+from .views import GameViewSet
 
 
 def _make_game(**overrides):
@@ -130,3 +131,80 @@ class ClosedRoundRejectsSubmissionTests(TestCase):
         # Sanity check the negative above is actually about the lock, not the fixture:
         # the same call succeeds before the round is closed.
         svc.submit(1, team, {})
+
+
+def _make_game_with(config_overrides=None, team_names=("Team A",), username="t_faculty"):
+    """Like _make_game, but with a config override and several teams."""
+    faculty = User.objects.create_user(username=username, password="x", role=Role.FACULTY)
+    config = {**api.default_config(), **(config_overrides or {})}
+    game = models.Game.objects.create(
+        name="Test Game", faculty=faculty, num_rounds=14, current_round=1,
+        takeover_round=4, config_snapshot=config,
+    )
+    game.faculty_members.add(faculty)
+    teams = [models.Team.objects.create(game=game, name=n) for n in team_names]
+    return game, teams
+
+
+class ResearchNeverLeaksTruthTests(TestCase):
+    """A student commissioning research receives only reported values, never engine truth."""
+
+    def test_stated_study_response_and_history_carry_no_truth(self):
+        game, (team,) = _make_game_with()
+        svc = GameService(game)
+        svc.close_round(1)
+
+        result = svc.commission_research(team, "segment_perception_tracker", "stated")
+        for seg, cell in result["sheet"].items():
+            self.assertEqual(set(cell), {"reported"}, f"{seg} leaked {cell}")
+
+        for entry in svc.research_history(team):
+            for seg, cell in entry["sheet"].items():
+                self.assertEqual(set(cell), {"reported"})
+
+        # Faculty/audit copy keeps the full sheet.
+        stored = models.ResearchCommission.objects.get(game=game, team=team)
+        self.assertTrue(all("true" in cell for cell in stored.sheet.values()))
+
+
+class LineExtensionThroughCloseRoundTests(TestCase):
+    """Launching the line extension charges its cost and cushions the round-9 crisis,
+    end to end through close_round."""
+
+    def setUp(self):
+        schedule = {**api.default_config()["lever_schedule"], "line_extension": 1}
+        self.game, (self.a, self.b) = _make_game_with(
+            {"lever_schedule": schedule}, team_names=("Team A", "Team B"))
+        self.svc = GameService(self.game)
+        # Team A launches in round 1; Team B never launches.
+        self.svc.submit(1, self.a, {"line_extension": {"launch": True, "positioning": 90.0}})
+        for rnd in range(1, 10):
+            self.svc.close_round(rnd)
+
+    def test_launch_and_carry_costs_are_charged(self):
+        r1 = self.svc.result_for(1)["firms"]["Team A"]["line_extension"]
+        r2 = self.svc.result_for(2)["firms"]["Team A"]["line_extension"]
+        self.assertAlmostEqual(r1["cost"], 8.0 + 1.5)   # launch round: launch + carry
+        self.assertAlmostEqual(r2["cost"], 1.5)         # later rounds: carry only
+        self.assertNotIn("line_extension", self.svc.result_for(2)["firms"]["Team B"])
+
+    def test_launched_team_takes_less_crisis_damage(self):
+        damage = self.svc.result_for(9)["damage"]
+        self.assertGreater(damage["Team B"], 0.0)
+        self.assertLess(damage["Team A"], damage["Team B"])
+
+
+class StudentResultHidesEngineInternalsTests(TestCase):
+    """The student round result never includes raw perception or attraction."""
+
+    def test_student_view_strips_perception_and_attraction(self):
+        game, (team,) = _make_game_with()
+        svc = GameService(game)
+        svc.close_round(1)
+        rec = svc.result_for(1)
+        self.assertIn("perception", rec["firms"][team.name])   # present server-side...
+
+        view = GameViewSet._student_result_view(rec, team.name)
+        self.assertNotIn("perception", view["firm"])           # ...but not sent to students
+        self.assertNotIn("attraction", view["firm"])
+        self.assertIn("share", view["firm"])                   # outcomes still sent
