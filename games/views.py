@@ -107,6 +107,18 @@ class GameViewSet(viewsets.ModelViewSet):
     def _service(self, game):
         return GameService(game)
 
+    def _viewing_team(self, game, request):
+        """The team whose read-only view to render. Faculty previewing a firm (the
+        Mimic action) pass ?as_team=<name> to see exactly what that team sees; anyone
+        else always gets their own team. as_team is faculty-only — a student can't use
+        it to look at another team's data."""
+        as_team = request.query_params.get("as_team")
+        if as_team:
+            if not request.user.is_faculty:
+                raise PermissionDenied("as_team is faculty-only")
+            return get_object_or_404(models.Team, game=game, name=as_team)
+        return team_for_user(game, request.user)
+
     def _resolve_team(self, game, user, team_name=None):
         """Faculty must name a team; a student acts as their own."""
         if user.is_faculty:
@@ -236,7 +248,7 @@ class GameViewSet(viewsets.ModelViewSet):
     def state(self, request, pk=None):
         game = self.get_object()
         svc = self._service(game)
-        team = team_for_user(game, request.user)
+        team = self._viewing_team(game, request)
         rnd = game.current_round
         return Response({
             "game": serializers.GameSerializer(game).data,
@@ -266,7 +278,7 @@ class GameViewSet(viewsets.ModelViewSet):
     def financials(self, request, pk=None):
         game = self.get_object()
         svc = self._service(game)
-        team = team_for_user(game, request.user)
+        team = self._viewing_team(game, request)
         return Response({
             "my_team": team.name if team else None,
             "financials": svc.financials(),
@@ -277,7 +289,7 @@ class GameViewSet(viewsets.ModelViewSet):
     def research(self, request, pk=None):
         game = self.get_object()
         svc = self._service(game)
-        team = team_for_user(game, request.user)
+        team = self._viewing_team(game, request)
         if request.method == "POST":
             if team is None:
                 raise ValidationError({"detail": "only a team member can commission research"})
@@ -295,7 +307,7 @@ class GameViewSet(viewsets.ModelViewSet):
     def forecast(self, request, pk=None):
         game = self.get_object()
         svc = self._service(game)
-        team = team_for_user(game, request.user)
+        team = self._viewing_team(game, request)
         if request.method == "POST":
             if team is None:
                 raise ValidationError({"detail": "only a team member can forecast"})
@@ -412,6 +424,9 @@ class GameViewSet(viewsets.ModelViewSet):
         if rec is None:
             return Response({"detail": "round not closed yet"},
                             status=status.HTTP_404_NOT_FOUND)
+        if request.query_params.get("as_team"):
+            team = self._viewing_team(game, request)
+            return Response(self._student_result_view(rec, team.name))
         if request.user.is_faculty:
             return Response(rec)
         team = team_for_user(game, request.user)
@@ -471,9 +486,10 @@ class GameViewSet(viewsets.ModelViewSet):
     def scorecard(self, request, pk=None):
         game = self.get_object()
         report = self._service(game).scorecard()  # list of {round, teams:{...}}
-        if request.user.is_faculty:
+        as_team = request.query_params.get("as_team")
+        if request.user.is_faculty and not as_team:
             return Response(report)
-        team = team_for_user(game, request.user)
+        team = self._viewing_team(game, request) if as_team else team_for_user(game, request.user)
         if team is None:
             raise PermissionDenied("not on a team")
         # Student sees only their own entry per round (which already carries the
