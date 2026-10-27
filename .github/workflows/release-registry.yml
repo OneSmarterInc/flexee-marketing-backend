@@ -1,0 +1,79 @@
+name: release-registry
+
+# Gives every merge to main a version number, a build number and a GitHub Release.
+#
+#   Version  vMAJOR.MINOR.PATCH. Patch goes up by default. Label the PR "minor"
+#            or "major" for a bigger step. The first release uses the version in
+#            .release-start (or 0.1.0 when that file is absent).
+#   Build    the number of commits on main at this point. It only goes up.
+#   Notes    GitHub lists the PRs merged since the previous release.
+#
+# Put [skip release] in a commit message to merge without a release.
+# The Flexee Release Registry reads these releases every day.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-registry
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag and release this merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if git tag --points-at "$SHA" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "This commit already has a version tag."
+            exit 0
+          fi
+
+          last=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          build=$(git rev-list --count "$SHA")
+          labels=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '[.[0].labels[]?.name] | join(",")' 2>/dev/null || true)
+
+          if [ -z "$last" ]; then
+            version=""
+            if [ -f .release-start ]; then
+              version=$(tr -d '[:space:]' < .release-start)
+            fi
+            version=${version:-0.1.0}
+          else
+            IFS=. read -r ma mi pa <<< "${last#v}"
+            case ",$labels," in
+              *,major,*) ma=$((ma + 1)); mi=0; pa=0 ;;
+              *,minor,*) mi=$((mi + 1)); pa=0 ;;
+              *)         pa=$((pa + 1)) ;;
+            esac
+            version="$ma.$mi.$pa"
+          fi
+
+          tag="v$version"
+          echo "Releasing $tag, build $build, commit ${SHA:0:7}"
+
+          git tag "$tag" "$SHA"
+          git push origin "refs/tags/$tag"
+
+          args=(--title "$tag (build $build)" --target "$SHA" --generate-notes --notes "Build $build · commit ${SHA:0:7}")
+          if [ -n "$last" ]; then
+            args+=(--notes-start-tag "$last")
+          fi
+          gh release create "$tag" "${args[@]}"
