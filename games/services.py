@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone as dj_tz
 from rest_framework.exceptions import ValidationError
 
 from flexee_engine import api
 from . import models
+from .deadlines import clock_runs, now_utc, round_deadline, round_opens
 from .enrichment_overlay import (
     LINE_EXT_CARRY_COST,
     LINE_EXT_LAUNCH_COST,
@@ -142,6 +146,15 @@ class GameService:
         if self.is_locked(rnd):
             raise ValidationError(
                 {"round": f"round {rnd} is closed; ask faculty to reopen it"})
+        if team.reference_path:
+            raise ValidationError({"team": "a reference firm plays a fixed path; nobody can decide for it"})
+        # A live game's round closes at its deadline (23:59 game time). Between the deadline
+        # and the sweep that closes it, a change is refused rather than quietly accepted.
+        if clock_runs(self.game):
+            deadline = round_deadline(self.game, rnd)
+            if deadline is not None and now_utc() > deadline:
+                raise ValidationError(
+                    {"round": f"Round {rnd} has closed, so this change was not saved."})
         cleaned = validate_decision(levers, self.open_levers(rnd), self.config)
         obj, _ = models.RoundSubmission.objects.update_or_create(
             game=self.game, round=rnd, team=team,
@@ -260,8 +273,63 @@ class GameService:
         return self._apply_line_extension(history, info)
 
     # ---- round close: pure re-derivation ----
+    CLAIM_STALE = timedelta(minutes=15)
+
+    def claim_close(self) -> bool:
+        """One claim per close: a single atomic UPDATE taken by every close path (the Advance
+        button, the scheduled sweep). A second close while one is running is refused; a claim
+        older than 15 minutes is treated as dead."""
+        now = dj_tz.now()
+        taken = models.Game.objects.filter(pk=self.game.pk).filter(
+            Q(close_claimed_at__isnull=True) | Q(close_claimed_at__lt=now - self.CLAIM_STALE)
+        ).update(close_claimed_at=now)
+        return taken == 1
+
+    def release_close(self) -> None:
+        models.Game.objects.filter(pk=self.game.pk).update(close_claimed_at=None)
+        self.game.close_claimed_at = None
+
+    def close_round(self, rnd: int, source: str = "faculty") -> dict:
+        """Close round `rnd` for every team in one step, and record the close (who closed it,
+        how long it took, how many firms had submitted). `source` is "faculty" (Advance) or
+        "deadline" (the scheduled sweep or a page load after the deadline)."""
+        if not self.claim_close():
+            raise ValidationError({"round": f"Round {rnd} is already closing; try again in a moment."})
+        started = dj_tz.now()
+        firms = self.game.teams.count()
+        submitted = self.game.submissions.filter(round=rnd).values("team_id").distinct().count()
+        decisions_open = bool(self.open_levers(rnd))
+        opened, deadline = round_opens(self.game, rnd), round_deadline(self.game, rnd)
+        try:
+            result = self._close_round_locked(rnd)
+        except Exception:
+            self._record_close(rnd, source, "failed", started, firms, submitted, decisions_open,
+                               opened, deadline, error_code="other")
+            raise
+        finally:
+            self.release_close()
+        self._record_close(rnd, source, "succeeded", started, firms, submitted, decisions_open,
+                           opened, deadline)
+        return result
+
+    def _record_close(self, rnd, source, status, started, firms, submitted, decisions_open,
+                      opened, deadline, error_code=None) -> None:
+        """Never lets a logging failure fail the close."""
+        try:
+            done = dj_tz.now()
+            models.RoundCloseLog.objects.create(
+                game_id_ref=self.game.pk, course=self.game.name, round=rnd, source=source,
+                status=status, error_code=error_code, opened_at=opened, deadline_at=deadline,
+                started_at=started, completed_at=done, seconds=(done - started).total_seconds(),
+                firms=firms, firms_submitted=submitted,
+                firms_carried_forward=max(firms - submitted, 0) if decisions_open else 0,
+                practice=self.game.is_practice,
+            )
+        except Exception:  # pragma: no cover - logging must not break a close
+            log.exception("could not record round close for game %s round %s", self.game.pk, rnd)
+
     @transaction.atomic
-    def close_round(self, rnd: int) -> dict:
+    def _close_round_locked(self, rnd: int) -> dict:
         names = self.team_names()
         history = self._compute(rnd)
 

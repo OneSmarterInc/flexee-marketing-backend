@@ -76,6 +76,25 @@ class Game(models.Model):
     seats_paid = models.PositiveIntegerField(default=0)
     advisor_rate_per_hour = models.DecimalField(max_digits=8, decimal_places=2, default=0)
 
+    # Practice game: a no-deadline copy of a live game for a faculty member to try the
+    # sim against scripted reference firms. Left out of billing, the scheduler, reminders
+    # and the reporting connector. `practice_of` points at the game it was copied from.
+    is_practice = models.BooleanField(default=False)
+    practice_of = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name="practice_runs")
+
+    # Per-game switch for every AI feature (Ask Claude, and the voice layer behind focus
+    # groups, advisors and the written-defense grade). On by default.
+    ai_enabled = models.BooleanField(default=True)
+
+    # Which round the day-before reminder email has already gone out for (once per round).
+    reminder_sent_for_round = models.PositiveIntegerField(null=True, blank=True)
+
+    # One claim per close: set by an atomic UPDATE keyed on the round being closed, taken
+    # by every close path (Advance, the scheduled sweep). A claim older than 15 minutes is
+    # treated as dead.
+    close_claimed_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -89,6 +108,9 @@ class Team(models.Model):
     members = models.JSONField(default=list, blank=True)  # display roster
     users = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True,
                                    related_name="teams")
+    # A reference firm in a practice game plays a scripted archetype (see games/practice.py);
+    # nobody can decide for it. Empty for an ordinary team.
+    reference_path = models.CharField(max_length=32, blank=True, default="")
 
     class Meta:
         unique_together = ("game", "name")
@@ -294,3 +316,78 @@ class Forecast(models.Model):
     class Meta:
         unique_together = ("game", "round", "team")
         ordering = ["round"]
+
+
+# ---------------------------------------------------------------------------------------
+# History that must outlive a game. These carry the game's id and name as plain columns
+# (no foreign key) on purpose: deleting a game must not erase its close history, scheduler
+# heartbeat or AI use, which the reporting connector reads.
+# ---------------------------------------------------------------------------------------
+class RoundCloseLog(models.Model):
+    """One round close, recorded when it ends (every team closes in one step)."""
+
+    SOURCES = (("deadline", "deadline"), ("faculty", "faculty"))
+    STATUSES = (("succeeded", "succeeded"), ("failed", "failed"))
+
+    game_id_ref = models.PositiveIntegerField(db_index=True)
+    course = models.CharField(max_length=200)            # the game's name, copied in
+    round = models.PositiveIntegerField()
+    source = models.CharField(max_length=16, choices=SOURCES)
+    status = models.CharField(max_length=16, choices=STATUSES)
+    error_code = models.CharField(max_length=32, null=True, blank=True)
+    opened_at = models.DateTimeField(null=True, blank=True)
+    deadline_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField()
+    completed_at = models.DateTimeField(db_index=True)
+    seconds = models.FloatField(default=0.0)
+    firms = models.PositiveIntegerField(default=0)
+    firms_submitted = models.PositiveIntegerField(default=0)
+    firms_carried_forward = models.PositiveIntegerField(default=0)
+    # Kept (so the site-wide spend and history stay whole) but left out of reporting. A flag
+    # rather than a lookup on the game, because the game may be deleted afterwards.
+    practice = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["completed_at"]
+        indexes = [models.Index(fields=["game_id_ref", "round"])]
+
+
+class SchedulerState(models.Model):
+    """When the scheduled sweep last ran (key "round-sweep")."""
+
+    key = models.CharField(max_length=64, primary_key=True)
+    last_run_at = models.DateTimeField()
+
+
+class AiCall(models.Model):
+    """One call to Claude on behalf of a game: which feature, how it went, tokens and cost."""
+
+    OUTCOMES = (("ok", "ok"), ("error", "error"))
+
+    game_id_ref = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    course = models.CharField(max_length=200, null=True, blank=True)
+    feature = models.CharField(max_length=32)   # ask_claude | focus_group | advisors | defense_grade
+    outcome = models.CharField(max_length=8, choices=OUTCOMES, default="ok")
+    sentences_dropped = models.PositiveIntegerField(default=0)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    cost_usd = models.FloatField(default=0.0)
+    practice = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+
+class AskQuestion(models.Model):
+    """A faculty member's question to Ask Claude about one game, kept 90 days."""
+
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="ask_questions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                             null=True, blank=True)
+    question = models.TextField()
+    answer = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]

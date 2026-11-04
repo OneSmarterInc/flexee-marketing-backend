@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     # local
     "accounts",
     "games",
+    "reporting",
 ]
 
 MIDDLEWARE = [
@@ -182,6 +183,22 @@ else:
 # See flexee_engine/README.md and the (hash-verified) model_client.py.
 FLEXEE_LLM_PROVIDER = os.environ.get("FLEXEE_LLM_PROVIDER", "anthropic")
 FLEXEE_LLM_MODEL = os.environ.get("FLEXEE_LLM_MODEL", "claude-haiku-4-5")
+
+# --- Round scheduler, reminders, Ask Claude, reporting connector ------------------------
+# The sweep (management command `run_scheduler`, or an external cron hitting
+# /meridian/api/cron/round-tick with CRON_SECRET) closes due rounds, sends the day-before
+# reminder and records a heartbeat for the reporting connector.
+REMINDER_EMAILS_ENABLED = _env_bool("REMINDER_EMAILS_ENABLED", True)
+EMAIL_DRY_RUN = _env_bool("EMAIL_DRY_RUN", False)   # log each email instead of sending it
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
+# The API's public address (no path), so the connector's discovery documents name the right
+# host. FRONTEND_URL above is the web app's.
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
+GIT_COMMIT = os.environ.get("GIT_COMMIT", "").strip()
+# Ask Claude is separate from the voice layer's cheap model: it reads a different model.
+FLEXEE_ASK_MODEL = os.environ.get("FLEXEE_ASK_MODEL", "claude-sonnet-5-5")
+FLEXEE_ASK_QUESTIONS_PER_MONTH = int(os.environ.get("FLEXEE_ASK_QUESTIONS_PER_MONTH", "100"))
+FLEXEE_AI_MONTHLY_CEILING_USD = float(os.environ.get("FLEXEE_AI_MONTHLY_CEILING_USD", "50"))
 
 LOGGING = {
     "version": 1,

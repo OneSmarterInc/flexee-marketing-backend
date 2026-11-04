@@ -4,7 +4,6 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from django.utils import timezone as dj_timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -55,6 +54,26 @@ def join(request, token):
 
 
 # --- Reference / health (no game context) -----------------------------------------
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def cron_round_tick(request):
+    """One pass of the round sweep, for an external cron (Vercel cron, systemd timer, curl).
+    Needs CRON_SECRET: `Authorization: Bearer <secret>`. Switched off when it isn't set."""
+    import hmac
+    from .scheduler import run_sweep
+    secret = getattr(settings, "CRON_SECRET", "")
+    if not secret:
+        return Response({"detail": "The round sweep endpoint is switched off (CRON_SECRET not set)."},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    header = request.headers.get("Authorization", "")
+    given = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not hmac.compare_digest(given.encode(), secret.encode()):
+        return Response({"detail": "Unauthorized."}, status=status.HTTP_401_UNAUTHORIZED)
+    result = run_sweep()
+    return Response({"closed": result["closed"], "remindersSent": result["reminders_sent"],
+                     "ranAt": result["ran_at"]})
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
@@ -177,7 +196,8 @@ class GameViewSet(viewsets.ModelViewSet):
         pacing = data.get("round_pacing_days", 7)
         # No start date given → the sim starts today, so it always gets a real schedule
         # instead of sitting undated until faculty sets one.
-        start_date = data.get("start_date") or dj_timezone.localdate()
+        from .deadlines import today_in
+        start_date = data.get("start_date") or today_in(data["timezone"])
         schedule = build_schedule(start_date, pacing, NUM_ROUNDS)
 
         with transaction.atomic():
@@ -187,7 +207,7 @@ class GameViewSet(viewsets.ModelViewSet):
                 status=models.GameStatus.SETUP,
                 student_capacity=data.get("student_capacity", 0),
                 start_date=start_date,
-                timezone=data.get("timezone", "UTC"),
+                timezone=data["timezone"],
                 round_pacing_days=pacing,
                 schedule=schedule,
                 students_per_team=data.get("students_per_team", 4),
@@ -247,6 +267,9 @@ class GameViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def state(self, request, pk=None):
         game = self.get_object()
+        # A game still moves on after its deadline even if nothing is running the sweep.
+        from .scheduler import auto_advance_if_due
+        auto_advance_if_due(game)
         svc = self._service(game)
         team = self._viewing_team(game, request)
         rnd = game.current_round
@@ -375,11 +398,28 @@ class GameViewSet(viewsets.ModelViewSet):
         want = bool(request.data.get("deployed", True))
         if want and not game.deployed:
             raise ValidationError({"detail": "This sim hasn't been deployed to faculty yet."})
+        opening = want and not game.student_deployed
         game.student_deployed = want
         fields = ["student_deployed"]
         if want and not game.student_deployed_at:
             game.student_deployed_at = timezone.now()
             fields.append("student_deployed_at")
+        if opening:
+            # Deploying starts play: the current round opens today (game time), the schedule
+            # is rebuilt from it, and the game is running. Without this the clock would still
+            # be the one set at creation, so a game deployed days later could open with its
+            # deadline already past.
+            from .deadlines import today_in
+            from .schedule import rebuild_from
+            today = today_in(game.timezone)
+            game.schedule = rebuild_from(game.schedule, game.current_round, today,
+                                         game.round_pacing_days, game.num_rounds)
+            if game.current_round <= 1:
+                game.start_date = today
+                fields.append("start_date")
+            game.status = models.GameStatus.RUNNING
+            game.reminder_sent_for_round = None
+            fields += ["schedule", "status", "reminder_sent_for_round"]
         game.save(update_fields=fields)
         return Response({"id": game.id, "student_deployed": game.student_deployed,
                          "student_deployed_at": game.student_deployed_at})
@@ -637,8 +677,11 @@ class GameViewSet(viewsets.ModelViewSet):
     # ---- faculty sim console: overview + payment + teaching note ----------------
     @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
     def overview(self, request, pk=None):
+        from .scheduler import auto_advance_if_due
         from .setup import overview_summary
-        return Response(overview_summary(self.get_object()))
+        game = self.get_object()
+        auto_advance_if_due(game)
+        return Response(overview_summary(game))
 
     @action(detail=True, methods=["get"], permission_classes=[IsFaculty])
     def students(self, request, pk=None):

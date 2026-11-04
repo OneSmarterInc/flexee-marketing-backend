@@ -44,3 +44,20 @@ def extend_round(schedule: list[dict], round_no: int, new_due: date, cascade: bo
             row["opens"] = _iso(date.fromisoformat(row["opens"]) + timedelta(days=delta))
             row["due"] = _iso(date.fromisoformat(row["due"]) + timedelta(days=delta))
     return out
+
+
+def rebuild_from(schedule: list[dict], current_round: int, today: date, pacing_days: int,
+                 num_rounds: int) -> list[dict]:
+    """Re-time the schedule so the current round opens `today` and later rounds follow
+    back-to-back at the usual length. Rounds before the current one keep their dates.
+
+    Deploying a game to students starts play; without this, the clock would still be the one
+    set when the game was *created*, so a game deployed days later could open with its
+    deadline already past."""
+    pacing = max(int(pacing_days or 7), 1)
+    cur = max(int(current_round or 1), 1)
+    kept = [dict(row) for row in (schedule or []) if int(row.get("round", 0)) < cur]
+    for r in range(cur, int(num_rounds) + 1):
+        opens = today + timedelta(days=(r - cur) * pacing)
+        kept.append({"round": r, "opens": _iso(opens), "due": _iso(opens + timedelta(days=pacing - 1))})
+    return kept

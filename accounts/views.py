@@ -4,6 +4,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from . import password_reset
 from .models import Role, User
 from .serializers import LoginSerializer, RegisterSerializer, UserSerializer
 
@@ -100,3 +101,45 @@ class DeleteUserView(APIView):
             raise ValidationError({"detail": "Admin accounts can't be deleted here."})
         user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PasswordResetRequestView(APIView):
+    """Email a reset code. The answer never says whether the address has an account."""
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes: list = []
+
+    def post(self, request):
+        message = password_reset.request_reset(str(request.data.get("email", "")))
+        return Response({"message": message})
+
+
+class PasswordResetVerifyView(APIView):
+    """Check a code without using it, so the form can say it's right before a password is chosen."""
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes: list = []
+
+    def post(self, request):
+        try:
+            password_reset.check_otp(str(request.data.get("email", "")), request.data.get("otp"))
+        except ValueError as e:
+            raise ValidationError({"detail": str(e)})
+        return Response({"message": "Code verified"})
+
+
+class PasswordResetConfirmView(APIView):
+    """Set a new password with the emailed code. The code works once."""
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes: list = []
+
+    def post(self, request):
+        try:
+            password_reset.reset_password(
+                str(request.data.get("email", "")), request.data.get("otp"),
+                str(request.data.get("new_password", "")),
+                str(request.data.get("confirm_password", "")))
+        except ValueError as e:
+            raise ValidationError({"detail": str(e)})
+        return Response({"message": "Password reset successfully"})

@@ -21,6 +21,14 @@ class User(AbstractUser):
 
     role = models.CharField(max_length=16, choices=Role.choices, default=Role.STUDENT)
 
+    # Password reset by emailed code (see accounts/password_reset.py). Only a hash of the
+    # code is kept; null/empty when none is outstanding.
+    reset_otp_hash = models.CharField(max_length=128, blank=True, default="")
+    reset_otp_expires_at = models.DateTimeField(null=True, blank=True)
+    # Wrong guesses against the current code; the code is dropped once they reach the limit.
+    reset_otp_attempts = models.PositiveSmallIntegerField(default=0)
+    reset_otp_sent_at = models.DateTimeField(null=True, blank=True)
+
     @property
     def is_admin(self) -> bool:
         return self.role == Role.ADMIN or self.is_superuser

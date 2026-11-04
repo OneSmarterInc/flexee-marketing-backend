@@ -41,7 +41,9 @@ class FacultySetupSerializer(serializers.Serializer):
     num_teams = serializers.IntegerField(min_value=1, max_value=26)
     student_capacity = serializers.IntegerField(required=False, default=0, min_value=0)
     start_date = serializers.DateField(required=False, allow_null=True)
-    timezone = serializers.CharField(required=False, default="UTC")
+    # No default: every deadline is on the game's own calendar, so creating a game needs the
+    # time zone the class meets in (a real IANA name).
+    timezone = serializers.CharField(required=True, allow_blank=True)
     round_pacing_days = serializers.IntegerField(required=False, default=7, min_value=1)
     students_per_team = serializers.IntegerField(required=False, default=4, min_value=1)
     price_per_student = serializers.DecimalField(max_digits=8, decimal_places=2,
@@ -61,6 +63,13 @@ class FacultySetupSerializer(serializers.Serializer):
     engagement_cap_per_round = serializers.IntegerField(required=False, min_value=1)
     crisis_inputs = serializers.DictField(required=False)
     reveal_policy = serializers.DictField(required=False)
+
+    def validate_timezone(self, value):
+        from .deadlines import validate_timezone
+        try:
+            return validate_timezone(value)
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
 
 
 # --- Student round submission (A2) ------------------------------------------------
