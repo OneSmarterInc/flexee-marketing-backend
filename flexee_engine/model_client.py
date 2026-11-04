@@ -21,8 +21,10 @@ one for the provider you choose (`pip install anthropic` or `pip install openai`
 
 from __future__ import annotations
 
+import contextvars
 import os
 import time
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 ModelClient = Callable[[str, str, float], str]  # (system, user, temperature) -> str
@@ -30,6 +32,39 @@ ModelClient = Callable[[str, str, float], str]  # (system, user, temperature) ->
 DEFAULT_MAX_TOKENS = 400          # personas/advisors speak briefly; grader returns small JSON
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_RETRIES = 2               # transient-error retries with backoff
+
+
+class ModelCallFailed(RuntimeError):
+    """Every attempt of a model call failed."""
+
+
+# Usage of the live calls made while a collector is open (see `collect_usage`): one entry per
+# call that Claude answered, {"model", "input_tokens", "output_tokens"}. The app layer opens a
+# collector around a feature to log its tokens and cost; nothing here knows about the database.
+_usage_sink: contextvars.ContextVar = contextvars.ContextVar("flexee_usage_sink", default=None)
+
+
+@contextmanager
+def collect_usage():
+    sink: list = []
+    token = _usage_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _usage_sink.reset(token)
+
+
+def _note_usage(resp, model: str) -> None:
+    sink = _usage_sink.get()
+    if sink is None:
+        return
+    usage = getattr(resp, "usage", None)
+    get = (lambda k: getattr(usage, k, 0) or 0) if usage is not None else (lambda k: 0)
+    sink.append({
+        "model": model,
+        "input_tokens": get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens"),
+        "output_tokens": get("output_tokens"),
+    })
 
 
 def _retry(fn, retries: int = DEFAULT_RETRIES, base_delay: float = 0.75):
@@ -42,7 +77,7 @@ def _retry(fn, retries: int = DEFAULT_RETRIES, base_delay: float = 0.75):
             if attempt == retries:
                 break
             time.sleep(base_delay * (2 ** attempt))
-    raise RuntimeError(f"model call failed after {retries + 1} attempts: {last}") from last
+    raise ModelCallFailed(f"model call failed after {retries + 1} attempts: {last}") from last
 
 
 def _strip_markdown_fence(text: str) -> str:
@@ -84,6 +119,7 @@ class AnthropicModelClient:
                 max_tokens=self._max_tokens,
                 temperature=temperature,
             )
+            _note_usage(resp, self._model)
             # concatenate any text blocks
             text = "".join(getattr(b, "text", "") for b in resp.content).strip()
             return _strip_markdown_fence(text)

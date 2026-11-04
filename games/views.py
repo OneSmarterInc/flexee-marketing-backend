@@ -247,6 +247,41 @@ class GameViewSet(viewsets.ModelViewSet):
         game.refresh_from_db()
         return Response(serializers.GameSerializer(game).data)
 
+    # ---- Ask Claude and the game's AI switch (faculty) ----
+    def _ask_status(self, game):
+        from . import ask_claude
+        return {"state": ask_claude.state(game), "enabled": game.ai_enabled,
+                "questions_left": ask_claude.questions_left(game),
+                "allowance": ask_claude.ask_settings().questions_per_month}
+
+    @action(detail=True, methods=["get", "post"], url_path="ask", permission_classes=[IsFaculty])
+    def ask(self, request, pk=None):
+        """GET: what the panel needs before a question (state, the switch, questions left).
+        POST: one question, answered from this game's own data."""
+        from . import ask_claude
+        game = self.get_object()
+        if request.method == "GET":
+            return Response(self._ask_status(game))
+        s = serializers.AskQuestionSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        try:
+            return Response(ask_claude.ask(user=request.user, game=game, context=d["context"],
+                                           question=d["question"], conversation_id=d["conversation_id"]))
+        except ask_claude.AskRefused as refused:
+            code = status.HTTP_503_SERVICE_UNAVAILABLE if refused.unreachable else status.HTTP_400_BAD_REQUEST
+            return Response({"detail": str(refused)}, status=code)
+
+    @action(detail=True, methods=["patch"], url_path="ai", permission_classes=[IsFaculty])
+    def ai(self, request, pk=None):
+        """The game's one switch for every AI feature."""
+        game = self.get_object()
+        s = serializers.AiSwitchSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        game.ai_enabled = s.validated_data["enabled"]
+        game.save(update_fields=["ai_enabled"])
+        return Response(self._ask_status(game))
+
     # ---- faculty roster: students across the faculty's sims ----
     @action(detail=False, methods=["get"], url_path="my-students", permission_classes=[IsFaculty])
     def my_students(self, request):

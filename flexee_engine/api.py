@@ -137,10 +137,16 @@ def _warmth_band(stated) -> str:
     return "mixed"
 
 
+# Passing model_client=None to a voice call is the engine's own no-LLM path (its deterministic
+# templated voice); leaving it out uses the shared client. The app layer passes None when a game's
+# AI is switched off.
+_SHARED = object()
+
+
 def focus_group(perception_by_firm, team, chosen_personas, relationships,
-                prompt: Optional[str] = None) -> list[dict]:
-    raw = _impl.focus_group(perception_by_firm, team, chosen_personas, relationships,
-                            prompt=prompt, model_client=get_model_client())
+                prompt: Optional[str] = None, model_client=_SHARED) -> list[dict]:
+    raw = _impl.focus_group(perception_by_firm, team, chosen_personas, relationships, prompt=prompt,
+                            model_client=get_model_client() if model_client is _SHARED else model_client)
     # App-layer guardrail: band the warmth and strip anything not student-safe (defense in
     # depth on top of the engine's own omission of segment/revealed warmth).
     safe = []
@@ -155,8 +161,9 @@ def focus_group(perception_by_firm, team, chosen_personas, relationships,
 
 
 # --- Advisors ---------------------------------------------------------------------
-def advise(decision_under_review, context) -> list[dict]:
-    return _impl.advise(decision_under_review, context, model_client=get_model_client())
+def advise(decision_under_review, context, model_client=_SHARED) -> list[dict]:
+    return _impl.advise(decision_under_review, context,
+                        model_client=get_model_client() if model_client is _SHARED else model_client)
 
 
 def build_usage_record(team, rnd, stances, decision_under_review):
@@ -178,9 +185,16 @@ def build_defense(history, decisions_by_round, engagement):
     return _impl.build_defense(history, decisions_by_round, engagement)
 
 
-def grade_written_defense(defense_text, packet, cache: Optional[dict] = None):
+def grade_written_defense(defense_text, packet, cache: Optional[dict] = None, model_client=_SHARED):
     return _impl.grade_written_defense(defense_text, packet,
-                                       model_client=get_model_client(), cache=cache)
+                                       model_client=get_model_client() if model_client is _SHARED else model_client,
+                                       cache=cache)
+
+
+def live_model_available() -> bool:
+    """True when the shared client is a real vendor client (not the offline stand-in)."""
+    from .model_client import OfflineModelClient
+    return not isinstance(get_model_client(), OfflineModelClient)
 
 
 def combine_report(deterministic_team, prose):

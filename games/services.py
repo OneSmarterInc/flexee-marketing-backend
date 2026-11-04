@@ -18,7 +18,7 @@ from django.utils import timezone as dj_tz
 from rest_framework.exceptions import ValidationError
 
 from flexee_engine import api
-from . import models
+from . import ai_use, models
 from .deadlines import clock_runs, now_utc, round_deadline, round_opens
 from .enrichment_overlay import (
     LINE_EXT_CARRY_COST,
@@ -641,7 +641,9 @@ class GameService:
         by_id = api.persona_by_id()
         chosen = [by_id[pid] for pid in persona_ids if pid in by_id]
         rels = self.relationships_for(team)
-        responses = api.focus_group(perception, team.name, chosen, rels, prompt=prompt)
+        with ai_use.session(self.game, "focus_group") as ai:
+            responses = api.focus_group(perception, team.name, chosen, rels, prompt=prompt,
+                                        model_client=ai.client)
         session = models.FocusGroupSession.objects.create(
             game=self.game, round=rnd, team=team, persona_ids=list(persona_ids),
             prompt=prompt or "", responses=responses, created_by=user,
@@ -660,7 +662,8 @@ class GameService:
             "eq": rec["equity"].get(team.name),
             "trust": rec["attribute_state"].get(team.name, {}).get("TRUST"),
         }
-        stances = api.advise(decision_under_review, context)
+        with ai_use.session(self.game, "advisors") as ai:
+            stances = api.advise(decision_under_review, context, model_client=ai.client)
         usage = api.build_usage_record(team.name, rnd, stances, decision_under_review)
         models.AdvisorConsultation.objects.create(
             game=self.game, round=rnd, team=team,
@@ -725,8 +728,16 @@ class GameService:
         packet = api.assemble_defense_packet(history, decisions_by_round, team.name,
                                              focus_groups, advisor_consults)
         cache = _DbGradeCache()
-        prose = api.grade_written_defense(defense_text, packet, cache=cache)
+        ai_off = False
+        with ai_use.session(self.game, "defense_grade") as ai:
+            if ai.client is None:
+                # AI is off for this game: the written part is not graded, only the decisions are.
+                prose, ai_off = {}, True
+            else:
+                prose = api.grade_written_defense(defense_text, packet, cache=cache, model_client=ai.client)
         combined = api.combine_report(det.get(team.name, {}), prose)
+        if ai_off:
+            combined["ai_off"] = True
 
         models.DefenseSubmission.objects.update_or_create(
             game=self.game, team=team,

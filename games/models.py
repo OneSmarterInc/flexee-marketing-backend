@@ -380,13 +380,27 @@ class AiCall(models.Model):
 
 
 class AskQuestion(models.Model):
-    """A faculty member's question to Ask Claude about one game, kept 90 days."""
+    """A faculty member's question to Ask Claude about one game, kept 90 days. A question Claude
+    could not answer is kept too (status "failed") and does not count against the allowance."""
+
+    STATUSES = (("answered", "answered"), ("failed", "failed"))
 
     game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="ask_questions")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                              null=True, blank=True)
+    conversation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    page = models.CharField(max_length=64, blank=True, default="")
+    context = models.JSONField(default=dict, blank=True)       # what was on screen
     question = models.TextField()
     answer = models.TextField(blank=True, default="")
+    lookups = models.JSONField(default=list, blank=True)       # what Claude looked up
+    dropped = models.JSONField(default=list, blank=True)       # sentences the figure check removed
+    figures_checked = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=STATUSES, default="answered")
+    model = models.CharField(max_length=64, blank=True, default="")
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    cost_usd = models.FloatField(default=0.0)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:

@@ -152,3 +152,32 @@ class RoundSubmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = models.RoundSubmission
         fields = ("round", "team", "submitted_levers", "submitted_at")
+
+
+# --- Ask Claude -------------------------------------------------------------------
+def clean_details(details) -> dict:
+    """What is on screen, kept small: at most 10 entries, keys up to 60 and values up to 200
+    characters, strings only."""
+    if not isinstance(details, dict):
+        return {}
+    items = [(k, v) for k, v in details.items() if isinstance(v, str)][:10]
+    return {str(k)[:60]: v[:200] for k, v in items}
+
+
+class AskContextSerializer(serializers.Serializer):
+    page = serializers.CharField(max_length=64)
+    label = serializers.CharField(max_length=120)
+    details = serializers.DictField(required=False, default=dict)
+
+    def validate_details(self, value):
+        return clean_details(value)
+
+
+class AskQuestionSerializer(serializers.Serializer):
+    question = serializers.CharField(allow_blank=True, trim_whitespace=False)
+    conversation_id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    context = AskContextSerializer()
+
+
+class AiSwitchSerializer(serializers.Serializer):
+    enabled = serializers.BooleanField()
