@@ -38,11 +38,14 @@ def extend_round(schedule: list[dict], round_no: int, new_due: date, cascade: bo
         raise ValueError("A round's due date can't be before it opens.")
     delta = (new_due - old_due).days
     out[idx]["due"] = _iso(new_due)
+    if delta:
+        out[idx]["extended"] = True      # a faculty member moved this deadline (reporting reads it)
 
     if cascade and delta:
         for row in out[idx + 1:]:
             row["opens"] = _iso(date.fromisoformat(row["opens"]) + timedelta(days=delta))
             row["due"] = _iso(date.fromisoformat(row["due"]) + timedelta(days=delta))
+            row["extended"] = True
     return out
 
 

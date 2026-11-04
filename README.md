@@ -232,6 +232,109 @@ cross-check implementations and the authoritative authored files:
    `flexee_service.py`/`make_flexee_game` are illustrative only (their AI/defense wiring has
    signature bugs vs the shipping modules and is not used by the app).
 
+## Deadlines, the scheduler and reminders
+
+- Creating a game needs the **time zone** the class meets in (a real IANA name, no default). Every
+  deadline is on the game's own calendar.
+- A round closes at **23:59 game time on its due date**, or sooner when a faculty member presses
+  Advance. A change after the deadline is refused ("Round N has closed, so this change was not
+  saved"). The last round is never closed automatically; a faculty member closes it. Practice
+  games have no deadlines.
+- **Deploying for students opens the current round now**: the schedule is re-timed from today.
+- A team that has not submitted when a round closes plays the cohort average (unchanged).
+- Every close path (Advance, the sweep, a page load after the deadline) takes one atomic claim
+  (`Game.close_claimed_at`, stale after 15 minutes), so two closes can never run at once. Each
+  close is recorded in `RoundCloseLog` (who closed it, how long it took, how many teams had
+  submitted); that history survives the game being deleted.
+- **Auto-advance** has three entry points, all sharing the claim: `python manage.py run_scheduler`
+  (a loop, `--interval 300`; `--once` for one sweep, e.g. from cron), an external cron calling
+  `GET|POST /meridian/api/cron/round-tick/` with `Authorization: Bearer $CRON_SECRET`, and a lazy
+  check on every `state`/`overview` page load. If only gunicorn runs (no scheduler process), the
+  lazy path still enforces deadlines when anyone opens a page. The sweep writes a heartbeat the
+  reporting connector reads (`scheduler_ok` = ran in the last 10 minutes).
+- **Day-before reminder email**: about a day before a round closes (half a round when rounds are
+  shorter than two days), once per round, only to students whose team has not submitted. Skipped:
+  inactive accounts, duplicate addresses, `test-N@mailinator.com`, reference firms, practice
+  games and rounds with nothing open. `REMINDER_EMAILS_ENABLED=false` turns it off;
+  `EMAIL_DRY_RUN=true` logs instead of sending. With the console/dummy mail backend nothing is
+  sent and the round is not marked as reminded.
+- **Password reset** by emailed six-digit code: `POST /auth/password-reset/{request,verify,confirm}/`.
+  The answer never says whether an email has an account; a code lasts 15 minutes, can be asked for
+  again after 60 seconds, dies after 5 wrong tries, is stored only as a hash, and resetting signs
+  out every session. Every wrong-code case gives one message, "Invalid or expired code".
+
+## Practice games
+
+`POST /games/:id/practice/` makes the caller a private practice copy of a live game: one firm of
+their own ("Your practice firm") against three scripted reference firms, **Heritage Defender**,
+**Performance Chaser** and **Wellness Pivoter**. Asking again returns the same copy;
+`POST /games/:id/practice/reset/` starts over. The three paths are the engine's own calibration
+archetypes (HERITAGE, PERF, PIVOT; a test pins them to `calibration.py`) played the same way every
+round, fitted to the game's budget and price band, and written inside each close before the engine
+computes, so no reference firm is ever a missing submission. A practice game starts at the takeover
+round, has no deadlines or students, and closes rounds only on Advance. It stays out of billing,
+the scheduler, reminders and the reporting connector. The faculty member plays their own firm
+through the normal student screens.
+
+## AI use and Ask Claude
+
+- Every Claude call from focus groups, advisors and the written-defense grade is measured (tokens
+  from the API response) and logged once per use in `AiCall` with its cost. Practice calls are
+  flagged and count toward spend but not toward reports.
+- One **monthly site ceiling** (`FLEXEE_AI_MONTHLY_CEILING_USD`, default 50, UTC calendar month)
+  and one **switch per game** (`Game.ai_enabled`, `PATCH /games/:id/ai/`). Either one off means: no
+  model client reaches the engine (focus groups and advisors use the engine's own templated
+  voice), the written part of a defense is not graded (the decision grade still is), and Ask
+  Claude refuses.
+- **Ask Claude** (`GET|POST /games/:id/ask/`, faculty only): Claude reads this one game through
+  read-only lookups (status, round close history, stored results, team detail, decisions, forecast
+  accuracy, engagement) and `games/facilitator_guide.py`, never gets people's names, and cannot
+  change anything. Every figure in an answer is checked against what the lookups returned; a
+  sentence with a figure no lookup returned is dropped and the panel says so. 100 questions per
+  game per month (`FLEXEE_ASK_QUESTIONS_PER_MONTH`); questions are kept 90 days; a failed question
+  is kept and does not count. Model: `FLEXEE_ASK_MODEL` (default `claude-sonnet-5-5`). It needs
+  `ANTHROPIC_API_KEY`, and one question can take up to about a minute, so run gunicorn with
+  `--timeout 120` or more.
+
+## Reporting connector (Flexee family reporting contract v1)
+
+A read-only MCP endpoint so an administrator can connect Claude to operational reporting.
+
+- Address: `{PUBLIC_API_URL}/meridian/api/mcp/reporting` (shown in Admin > Reporting). Discovery
+  documents are served at the **host root**: `/.well-known/oauth-protected-resource[/meridian/api/mcp/reporting]`
+  and `/.well-known/oauth-authorization-server[/meridian/api/oauth/reporting]`, so the host must route
+  `/.well-known/` to Django. Set `PUBLIC_API_URL` (the API host, no path) and `FRONTEND_URL`.
+- Auth: OAuth 2.0 authorization code with S256 PKCE, for Claude's Client ID Metadata Document
+  (read only from claude.ai or claude.com) or Dynamic Client Registration. Redirects are allowed
+  only on claude.ai, claude.com and loopback (any port). Only an **active administrator** can
+  approve, on the web app's `/oauth/reporting/authorize` page, and a connection stops the moment its
+  administrator stops being one. Codes are single-use for 10 minutes, access tokens last 60
+  minutes, refresh tokens rotate and last 30 days; everything is stored as a SHA-256 hash.
+- Six read-only tools, every row starting with `sim` (`marketing_management`): `report_courses`,
+  `report_quarters`, `report_closes`, `report_requests` (always empty), `report_ai_use`,
+  `report_health`. A course is a game and a quarter is a round (the rounds before the takeover round
+  are `warm_up`). Practice games, test participants, names, emails and results are never included.
+- 120 calls a minute per connection (per worker). Each call is logged (tool, status, rows,
+  milliseconds; never the rows) and shown in Admin > Reporting, where a connection can be revoked.
+
+## Deployment checklist for the above
+
+```
+python manage.py migrate
+# one of: a scheduler process, an external cron, or neither (the lazy path still runs)
+python manage.py run_scheduler            # or: --once from cron every 5 minutes
+gunicorn config.wsgi --timeout 120 ...    # Ask Claude can take about a minute
+```
+
+Environment: `PUBLIC_API_URL`, `FRONTEND_URL`, `CRON_SECRET` (only for the cron endpoint),
+`ANTHROPIC_API_KEY`, `FLEXEE_ASK_MODEL`, `FLEXEE_AI_MONTHLY_CEILING_USD`, `GIT_COMMIT` (shown by
+`report_health`), `REMINDER_EMAILS_ENABLED`, `EMAIL_DRY_RUN`, and a real mail backend
+(`MAIL_BACKEND`) for reminders and password reset. See `.env.example`.
+
+## Tests
+
+`python manage.py test` (Django, API and services) and `python -m pytest -q` (engine integrity).
+
 ## Notes / roadmap
 
 - The dev stub is **not calibrated** — its numbers are plausible placeholders to exercise
@@ -239,5 +342,3 @@ cross-check implementations and the authoritative authored files:
 - **Confirmed seam:** `run_game_with_faculty` returns `(history, built)`; `_real.run_history`
   unwraps it and embeds `built[i]` into each record's `effective_decisions` (still confirm
   `assemble_defense_packet`'s name in the shipping `defense.py`).
-- No automated tests ship in this snapshot; add per-app unit tests as the frontend
-  firms up the exact response shapes it needs.
