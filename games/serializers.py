@@ -17,6 +17,7 @@ class TeamSerializer(serializers.ModelSerializer):
 class GameSerializer(serializers.ModelSerializer):
     teams = TeamSerializer(many=True, read_only=True)
     faculty_members = serializers.SerializerMethodField()
+    practice_paths = serializers.SerializerMethodField()
 
     class Meta:
         model = models.Game
@@ -26,11 +27,20 @@ class GameSerializer(serializers.ModelSerializer):
                   "round_pacing_days", "faculty_members", "deployed", "deployed_at",
                   "student_deployed", "student_deployed_at", "schedule",
                   "students_per_team", "price_per_student",
-                  "seats_paid", "advisor_rate_per_hour")
-        read_only_fields = ("created_at", "status", "current_round")
+                  "seats_paid", "advisor_rate_per_hour", "is_practice", "practice_of", "ai_enabled", "practice_paths")
+        read_only_fields = ("created_at", "status", "current_round", "is_practice", "practice_of", "ai_enabled")
 
     def get_faculty_members(self, obj):
         return list(obj.faculty_members.values_list("username", flat=True))
+
+    def get_practice_paths(self, obj):
+        """The reference firms of a practice game and the strategy each one plays."""
+        if not obj.is_practice:
+            return []
+        from .practice import REFERENCE_PATHS
+        return [{"team": t.name, "name": REFERENCE_PATHS[t.reference_path].name,
+                 "blurb": REFERENCE_PATHS[t.reference_path].blurb}
+                for t in obj.teams.all() if t.reference_path in REFERENCE_PATHS]
 
 
 # --- Faculty setup (A1) -----------------------------------------------------------

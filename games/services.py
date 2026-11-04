@@ -331,6 +331,10 @@ class GameService:
     @transaction.atomic
     def _close_round_locked(self, rnd: int) -> dict:
         names = self.team_names()
+        if self.game.is_practice:
+            # The reference firms play their fixed paths first, so none is ever a missing submission.
+            from .practice import write_reference_decisions
+            write_reference_decisions(self.game, rnd, self.open_levers(rnd))
         history = self._compute(rnd)
 
         # Crisis (decision 1): at/after the crisis round, derive per-team crisis_inputs from

@@ -139,9 +139,13 @@ class GameViewSet(viewsets.ModelViewSet):
         return team_for_user(game, request.user)
 
     def _resolve_team(self, game, user, team_name=None):
-        """Faculty must name a team; a student acts as their own."""
+        """Faculty must name a team (in their own practice game, their own firm is the default);
+        a student acts as their own."""
         if user.is_faculty:
             if not team_name:
+                own = team_for_user(game, user)
+                if own is not None:
+                    return own
                 raise ValidationError({"team": "faculty must specify a team"})
             return get_object_or_404(models.Team, game=game, name=team_name)
         team = team_for_user(game, user)
@@ -222,6 +226,27 @@ class GameViewSet(viewsets.ModelViewSet):
         return Response(serializers.GameSerializer(game).data,
                         status=status.HTTP_201_CREATED)
 
+    # ---- practice games (faculty) ----
+    @action(detail=True, methods=["post"], url_path="practice", permission_classes=[IsFaculty])
+    def practice(self, request, pk=None):
+        """A practice copy of this game for the caller: one firm of their own plus three
+        scripted reference firms. Asking again returns the same one."""
+        from .practice import create_practice
+        source = self.get_object()
+        game, created = create_practice(request.user, source)
+        return Response(serializers.GameSerializer(game).data,
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="practice/reset", permission_classes=[IsFaculty])
+    def practice_reset(self, request, pk=None):
+        """Start over: wipe the play and return to the first decision round."""
+        from .practice import require_practice_access, reset_practice
+        game = self.get_object()
+        require_practice_access(request.user, game)
+        reset_practice(game)
+        game.refresh_from_db()
+        return Response(serializers.GameSerializer(game).data)
+
     # ---- faculty roster: students across the faculty's sims ----
     @action(detail=False, methods=["get"], url_path="my-students", permission_classes=[IsFaculty])
     def my_students(self, request):
@@ -261,7 +286,7 @@ class GameViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], permission_classes=[IsAdmin])
     def billing(self, request):
         from .billing import compute_billing
-        return Response(compute_billing(models.Game.objects.all()))
+        return Response(compute_billing(models.Game.objects.filter(is_practice=False)))
 
     # ---- state summary (student or faculty) ----
     @action(detail=True, methods=["get"])
@@ -467,10 +492,10 @@ class GameViewSet(viewsets.ModelViewSet):
         if request.query_params.get("as_team"):
             team = self._viewing_team(game, request)
             return Response(self._student_result_view(rec, team.name))
-        if request.user.is_faculty:
-            return Response(rec)
-        team = team_for_user(game, request.user)
+        team = team_for_user(game, request.user)     # a student, or faculty in their practice game
         if team is None:
+            if request.user.is_faculty:
+                return Response(rec)
             raise PermissionDenied("not on a team")
         return Response(self._student_result_view(rec, team.name))
 
@@ -527,10 +552,10 @@ class GameViewSet(viewsets.ModelViewSet):
         game = self.get_object()
         report = self._service(game).scorecard()  # list of {round, teams:{...}}
         as_team = request.query_params.get("as_team")
-        if request.user.is_faculty and not as_team:
-            return Response(report)
         team = self._viewing_team(game, request) if as_team else team_for_user(game, request.user)
         if team is None:
+            if request.user.is_faculty:
+                return Response(report)
             raise PermissionDenied("not on a team")
         # Student sees only their own entry per round (which already carries the
         # anonymized cohort best/avg/worst block). Enrich each round with the brand-tracker

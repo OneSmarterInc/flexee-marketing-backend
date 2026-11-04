@@ -18,9 +18,11 @@ class IsAdmin(permissions.BasePermission):
 
 
 def team_for_user(game, user):
-    """The team a student belongs to in this game, or None. Faculty get None (they see all)."""
+    """The team a student belongs to in this game, or None. Faculty get None (they see all) —
+    except in their own practice game, where they play as their own firm."""
     if user.is_faculty:
-        return None
+        from .practice import my_team
+        return my_team(game, user)
     return game.teams.filter(users=user).first()
 
 
