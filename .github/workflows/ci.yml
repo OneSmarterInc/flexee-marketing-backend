@@ -1,0 +1,31 @@
+name: ci
+
+# Runs every test on every push and pull request, on GitHub's own runners (the same
+# ubuntu-latest runners the release-registry workflow already uses). Restored after the
+# 5 Nov 2026 audit: the security holes it found reached main while no tests ran.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      FLEXEE_LLM_PROVIDER: offline          # the offline stand-in: no API key, no network, no cost
+      DJANGO_SECRET_KEY: ci-only-not-secret
+      DJANGO_DEBUG: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Engine golden suite and integrity guard
+        run: python -m pytest
+      - run: python manage.py check
+      - name: No model change without its migration
+        run: python manage.py makemigrations --check --dry-run
+      - name: App tests
+        run: python manage.py test
