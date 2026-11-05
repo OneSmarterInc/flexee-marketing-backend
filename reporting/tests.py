@@ -593,7 +593,8 @@ class ViewTests(ReportingTestCase):
             started_at=now - timedelta(days=91), completed_at=now - timedelta(days=91))
         rows = self.conforms("report_closes")
         self.assertEqual([r["close_id"] for r in rows], [keep.id])
-        self.assertEqual((rows[0]["quarter"], rows[0]["firm_id"], rows[0]["source"], rows[0]["seconds"]), (4, None, "faculty", 1.2))
+        self.assertEqual((rows[0]["quarter"], rows[0]["firm_id"], rows[0]["seconds"]), (4, None, 1.2))
+        self.assertNotIn("source", rows[0])   # MM1: not in contract v1
 
     def test_closes_survive_the_game_being_deleted(self):
         g = _game()
@@ -664,3 +665,46 @@ class ViewTests(ReportingTestCase):
         everything = json.dumps({tool: self.c.call(tool) for tool in reports.TOOLS})
         for secret in ("zelda", "Zelda", "Fitzgerald", "private.example", "Team A", "@example.com", "boss"):
             self.assertNotIn(secret, everything, secret)
+
+
+
+# --- Contract v1, column for column (decision MM1, Vikram, 5 Nov 2026) -----------------------
+# Every Flexee sim publishes exactly these columns, in this order, so one dashboard reads them
+# all. A change here is a new contract version for the whole family, never one sim's extra.
+CONTRACT_V1 = {
+    "report_courses": "sim course_id course institution product engine_version status quarter_now "
+                      "quarters firms students students_confirmed next_deadline_at created_at deployed_at",
+    "report_quarters": "sim course_id course quarter warm_up state deadline_at deadline_extended opened_at "
+                       "opened_after_deadline overdue close_started_at closed_at close_minutes firms "
+                       "firms_submitted firms_carried_forward explanations_required explanations_submitted",
+    "report_closes": "sim close_id course_id course quarter firm_id status error_code started_at completed_at seconds",
+    "report_requests": "sim request_id course_id course quarter status filed_at decided_at days_waiting has_reason review",
+    "report_ai_use": "sim course_id course month feature calls failures sentences_dropped input_tokens "
+                     "output_tokens cost_usd",
+    "report_health": "sim contract checked_at environment commit php_version database_version migrations_pending "
+                     "jobs_waiting oldest_job_minutes failed_jobs_7d scheduler_last_run_at scheduler_ok "
+                     "courses_running quarters_overdue closes_failed requests_waiting ai_enabled "
+                     "ai_spent_this_month_usd ai_ceiling_usd certificate_expires_at certificate_days_left "
+                     "connections_active",
+}
+
+
+class ContractV1ColumnsTests(TestCase):
+    def test_the_six_tools_publish_exactly_the_contract_columns(self):
+        from reporting.reports import TOOLS
+        self.assertEqual(sorted(TOOLS), sorted(CONTRACT_V1))
+        for tool, cols in CONTRACT_V1.items():
+            self.assertEqual(list(TOOLS[tool]["columns"]), cols.split(), tool)
+
+    def test_rows_carry_exactly_the_contract_columns(self):
+        from reporting import reports
+        owner = User.objects.create_user(username="o@x.edu", email="o@x.edu", password="pw-123456", role=Role.FACULTY)
+        g = models.Game.objects.create(name="Contract game", faculty=owner, student_deployed=True)
+        models.RoundCloseLog.objects.create(game_id_ref=g.id, course=g.name, round=1, source="faculty",
+                                            status="succeeded", started_at=timezone.now(),
+                                            completed_at=timezone.now(), seconds=1.0)
+        for tool in ("report_courses", "report_quarters", "report_closes", "report_health"):
+            rows = reports.run(tool)
+            self.assertTrue(rows, tool)
+            for row in rows:
+                self.assertEqual(list(row), CONTRACT_V1[tool].split(), tool)

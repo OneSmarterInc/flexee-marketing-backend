@@ -99,7 +99,6 @@ TOOLS = {
             ("firm_id", "Always null: a close covers every team at once."),
             ("status", "succeeded or failed."),
             ("error_code", "other for a failed close, else null."),
-            ("source", "deadline (the scheduled sweep or a page load after the deadline) or faculty (the Advance button)."),
             ("started_at", "When it started."),
             ("completed_at", "When it finished."),
             ("seconds", "Seconds it took."),
@@ -267,7 +266,7 @@ def closes() -> list[dict]:
     since = _now() - timedelta(days=90)
     return [{
         "sim": SIM, "close_id": l.id, "course_id": l.game_id_ref, "course": l.course, "quarter": l.round,
-        "firm_id": None, "status": l.status, "error_code": l.error_code, "source": l.source,
+        "firm_id": None, "status": l.status, "error_code": l.error_code,
         "started_at": iso(l.started_at), "completed_at": iso(l.completed_at), "seconds": round(l.seconds, 1),
     } for l in models.RoundCloseLog.objects.filter(completed_at__gte=since, practice=False).order_by("completed_at")]
 
