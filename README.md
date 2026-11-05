@@ -101,8 +101,8 @@ python manage.py runserver
 
 Then check `http://127.0.0.1:8000/meridian/api/health/`.
 
-Create faculty and student accounts from the sign-up page. Admins can't be self-created; set
-one from the server:
+The login page has no sign-up. Students join a cohort through its invite link; admin and faculty
+accounts are set from the server:
 
 ```bash
 python manage.py set_admin --email <email>                    # admin; asks for the password
