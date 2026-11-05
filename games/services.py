@@ -142,19 +142,33 @@ class GameService:
         self.game.save(update_fields=["locked_rounds"])
 
     # ---- submissions ----
-    def submit(self, rnd: int, team: models.Team, levers: dict, user=None) -> dict:
-        if self.is_locked(rnd):
-            raise ValidationError(
-                {"round": f"round {rnd} is closed; ask faculty to reopen it"})
-        if team.reference_path:
-            raise ValidationError({"team": "a reference firm plays a fixed path; nobody can decide for it"})
+    def _lock_open_round(self, rnd: int) -> None:
+        """Call inside a transaction, before writing anything for round `rnd`.
+
+        Locks the game row (the close's claim updates the same row, so a save and a close can't
+        overlap), then checks, on the freshly read row, that `rnd` is the round open now, that it
+        isn't closed or closing, and that its deadline hasn't passed (audit M1-M3)."""
+        game = models.Game.objects.select_for_update().get(pk=self.game.pk)
+        self.game.locked_rounds, self.game.current_round = game.locked_rounds, game.current_round
+        if rnd in (game.locked_rounds or []):
+            raise ValidationError({"round": f"Round {rnd} is closed; ask faculty to reopen it."})
+        if rnd != game.current_round:
+            raise ValidationError({"round": f"Round {rnd} isn't open. Round {game.current_round} is."})
+        if game.close_claimed_at and dj_tz.now() - game.close_claimed_at < self.CLAIM_STALE:
+            raise ValidationError({"round": f"Round {rnd} is closing now, so this change was not saved."})
         # A live game's round closes at its deadline (23:59 game time). Between the deadline
         # and the sweep that closes it, a change is refused rather than quietly accepted.
-        if clock_runs(self.game):
-            deadline = round_deadline(self.game, rnd)
+        if clock_runs(game):
+            deadline = round_deadline(game, rnd)
             if deadline is not None and now_utc() > deadline:
                 raise ValidationError(
                     {"round": f"Round {rnd} has closed, so this change was not saved."})
+
+    @transaction.atomic
+    def submit(self, rnd: int, team: models.Team, levers: dict, user=None) -> dict:
+        if team.reference_path:
+            raise ValidationError({"team": "a reference firm plays a fixed path; nobody can decide for it"})
+        self._lock_open_round(rnd)
         cleaned = validate_decision(levers, self.open_levers(rnd), self.config)
         obj, _ = models.RoundSubmission.objects.update_or_create(
             game=self.game, round=rnd, team=team,
@@ -522,8 +536,10 @@ class GameService:
                 for c in self.game.research.filter(team=team).order_by("-created_at")]
 
     # ---- forecast loop (Group C) ----
+    @transaction.atomic
     def submit_forecast(self, rnd: int, team: models.Team, metric: str, predicted: float,
                         note: str = "", user=None) -> dict:
+        self._lock_open_round(rnd)     # a forecast locks with its round, like a decision (audit M2)
         if metric not in ("own_share", "growth_share"):
             raise ValidationError({"metric": "must be 'own_share' or 'growth_share'"})
         obj, _ = models.Forecast.objects.update_or_create(

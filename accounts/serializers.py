@@ -29,6 +29,13 @@ class RegisterSerializer(serializers.ModelSerializer):
         # the server with `manage.py set_admin` (or promoted by an existing admin).
         if value == Role.ADMIN:
             raise serializers.ValidationError("admin accounts cannot be created here")
+        # Faculty accounts are made by an admin (the new-sim form's "+ Add new", or
+        # `manage.py set_admin --role faculty`). Anyone else gets a student account (audit H2).
+        if value == Role.FACULTY:
+            request = self.context.get("request")
+            user = getattr(request, "user", None)
+            if not (user and user.is_authenticated and user.is_admin):
+                raise serializers.ValidationError("faculty accounts are created by an admin")
         return value
 
     def create(self, validated_data):

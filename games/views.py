@@ -5,7 +5,8 @@ from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
+from config.throttling import AuthRateThrottle
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -21,6 +22,7 @@ log = logging.getLogger("flexee.views")
 # --- Public: student self-registration via invite / join link ---------------------
 @api_view(["GET", "POST"])
 @permission_classes([AllowAny])
+@throttle_classes([AuthRateThrottle])
 def join(request, token):
     from rest_framework.authtoken.models import Token
     from accounts.serializers import UserSerializer
@@ -51,6 +53,9 @@ def join(request, token):
     tok, _ = Token.objects.get_or_create(user=user)
     return Response({"token": tok.key, "user": UserSerializer(user).data,
                      "game_id": game.id}, status=status.HTTP_201_CREATED)
+
+
+join.cls.throttle_scope = "auth"
 
 
 # --- Reference / health (no game context) -----------------------------------------

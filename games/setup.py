@@ -12,7 +12,6 @@ from django.utils import timezone
 from accounts.models import Role, User
 from . import models
 
-TEST_PASSWORD = "flexee-test-1234"          # shared password for provisioned test accounts
 TEST_DOMAIN = "mailinator.com"
 
 
@@ -36,6 +35,9 @@ def ensure_join_token(game) -> str:
 def provision_test_team(game, per_firm: int) -> dict:
     """Create test students (test-N@mailinator.com), enroll them, and round-robin them
     across the sim's firms. Existing test accounts are reused. Returns a small summary."""
+    if game.student_deployed and not game.is_practice:
+        raise ValueError("Test students can only be added before the simulation is opened to "
+                         "students. Use a practice game to try it out.")
     teams = list(game.teams.all())
     if not teams:
         raise ValueError("Create at least one firm before provisioning a test team.")
@@ -43,6 +45,9 @@ def provision_test_team(game, per_firm: int) -> dict:
     total = per_firm * len(teams)
 
     created = 0
+    # A new random password every time, set on new AND reused accounts, shown once to the faculty
+    # member. (The old fixed password was in the code, and the code is public: audit H1.)
+    password = secrets.token_urlsafe(9)
     with transaction.atomic():
         for i in range(total):
             email = f"test-{i + 1}@{TEST_DOMAIN}"
@@ -51,15 +56,15 @@ def provision_test_team(game, per_firm: int) -> dict:
                 defaults={"email": email, "role": Role.STUDENT,
                           "first_name": "Test", "last_name": f"Student {i + 1}"},
             )
+            user.set_password(password)
+            user.save()
             if made:
-                user.set_password(TEST_PASSWORD)
-                user.save()
                 created += 1
             models.Enrollment.objects.get_or_create(
                 game=game, user=user, defaults={"is_test": True})
             team = teams[i % len(teams)]
             team.users.add(user)
-    return {"provisioned": total, "created": created, "password": TEST_PASSWORD, "domain": TEST_DOMAIN}
+    return {"provisioned": total, "created": created, "password": password, "domain": TEST_DOMAIN}
 
 
 # ---- invitations ----------------------------------------------------------------
@@ -137,6 +142,14 @@ def accept_join(token: str, email: str, password: str, first: str = "", last: st
                         first_name=first.strip(), last_name=last.strip())
             user.set_password(password)
             user.save()
+        else:
+            # An existing account joins only with its own password, and only a student account.
+            # Without this check a join link signed anyone in as any account (audit C1).
+            if not user.is_active or not user.check_password(password):
+                raise ValueError("An account with that email already exists. Use its password, "
+                                 "or reset the password from the sign-in page.")
+            if user.role != Role.STUDENT:
+                raise ValueError("This link is for students. Sign in to Flexee as usual.")
         models.Enrollment.objects.get_or_create(game=game, user=user)
         if inv and inv.status == models.InviteStatus.PENDING:
             inv.status = models.InviteStatus.ACCEPTED

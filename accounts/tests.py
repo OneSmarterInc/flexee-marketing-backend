@@ -129,12 +129,25 @@ class PasswordResetTests(TestCase):
 
 class SignUpAndAdminTests(TestCase):
     def test_sign_up_makes_students_and_faculty_but_never_an_admin(self):
+        # Anyone can make a student account; only a signed-in admin can make a faculty one
+        # (the new-sim form's "+ Add new").
         client = APIClient()
-        for role in ("student", "faculty"):
-            r = client.post("/meridian/api/auth/register/", {
-                "username": f"new_{role}", "email": f"{role}@example.com",
-                "password": "a-long-password", "role": role}, format="json")
-            self.assertEqual(r.status_code, 201, r.content)
+        r = client.post("/meridian/api/auth/register/", {
+            "username": "new_student", "email": "student@example.com",
+            "password": "a-long-password", "role": "student"}, format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        r = client.post("/meridian/api/auth/register/", {
+            "username": "new_faculty", "email": "faculty@example.com",
+            "password": "a-long-password", "role": "faculty"}, format="json")
+        self.assertEqual(r.status_code, 400, r.content)
+        admin = User.objects.create_user(username="boss", email="boss@example.com",
+                                         password="a-long-password", role=Role.ADMIN)
+        client.force_authenticate(admin)
+        r = client.post("/meridian/api/auth/register/", {
+            "username": "new_faculty", "email": "faculty@example.com",
+            "password": "a-long-password", "role": "faculty"}, format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        client.force_authenticate(None)
         r = client.post("/meridian/api/auth/register/", {
             "username": "sneaky", "email": "s@example.com",
             "password": "a-long-password", "role": "admin"}, format="json")

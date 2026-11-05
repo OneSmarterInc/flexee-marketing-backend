@@ -25,7 +25,10 @@ def _env_bool(key: str, default: bool = False) -> bool:
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY", "dev-insecure-change-me-before-deploying-anything"
 )
-DEBUG = _env_bool("DJANGO_DEBUG", True)
+DEBUG = _env_bool("DJANGO_DEBUG", False)   # off unless a dev .env turns it on (audit H3)
+if not DEBUG and SECRET_KEY.startswith("dev-insecure"):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured("Set DJANGO_SECRET_KEY: the dev default can't be used with DEBUG off.")
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 if DEBUG and "testserver" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("testserver")  # Django/DRF test client default host
@@ -136,6 +139,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "EXCEPTION_HANDLER": "config.exceptions.api_exception_handler",
     "PAGE_SIZE": 50,
+
 }
 
 # --- CORS -------------------------------------------------------------------------
@@ -212,3 +216,9 @@ LOGGING = {
         "flexee": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
+
+
+# Sign-in, sign-up, join and password-reset attempts per client address (audit M4). Off while the
+# test suite runs (tests switch it on for themselves); raise it if a class signs in from one network.
+import sys as _sys
+FLEXEE_AUTH_RATE = None if "test" in _sys.argv[1:2] else (os.environ.get("FLEXEE_AUTH_RATE", "30/min") or None)

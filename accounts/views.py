@@ -2,6 +2,7 @@ from rest_framework import permissions, status
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from config.throttling import AuthRateThrottle
 from rest_framework.views import APIView
 
 from . import password_reset
@@ -17,10 +18,12 @@ class IsAdmin(permissions.BasePermission):
 
 
 class RegisterView(APIView):
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "auth"
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
+        serializer = RegisterSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         token, _ = Token.objects.get_or_create(user=user)
@@ -31,6 +34,8 @@ class RegisterView(APIView):
 
 
 class LoginView(APIView):
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "auth"
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -80,6 +85,9 @@ class SetRoleView(APIView):
         user = User.objects.filter(username=username).first()
         if not user:
             raise ValidationError({"username": "unknown user"})
+        if (user.role == Role.ADMIN and role != Role.ADMIN
+                and User.objects.filter(role=Role.ADMIN, is_active=True).count() <= 1):
+            raise ValidationError({"role": "This is the only admin. Make someone else an admin first."})
         user.role = role
         user.save(update_fields=["role"])
         return Response(UserSerializer(user).data)
@@ -106,6 +114,8 @@ class DeleteUserView(APIView):
 class PasswordResetRequestView(APIView):
     """Email a reset code. The answer never says whether the address has an account."""
 
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "auth"
     permission_classes = [permissions.AllowAny]
     authentication_classes: list = []
 
@@ -117,6 +127,8 @@ class PasswordResetRequestView(APIView):
 class PasswordResetVerifyView(APIView):
     """Check a code without using it, so the form can say it's right before a password is chosen."""
 
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "auth"
     permission_classes = [permissions.AllowAny]
     authentication_classes: list = []
 
@@ -131,6 +143,8 @@ class PasswordResetVerifyView(APIView):
 class PasswordResetConfirmView(APIView):
     """Set a new password with the emailed code. The code works once."""
 
+    throttle_classes = [AuthRateThrottle]
+    throttle_scope = "auth"
     permission_classes = [permissions.AllowAny]
     authentication_classes: list = []
 
