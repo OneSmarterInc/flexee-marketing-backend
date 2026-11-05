@@ -141,25 +141,36 @@ class SignUpAndAdminTests(TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertFalse(User.objects.filter(username="sneaky").exists())
 
-    def test_set_admin_creates_then_updates_the_same_account(self):
+    def test_set_admin_by_email_creates_then_updates_and_can_sign_in(self):
         from django.core.management import call_command
-        call_command("set_admin", username="boss", email="Boss@Example.com", password="first-long-pass")
-        u = User.objects.get(username="boss")
-        self.assertEqual((u.role, u.email), (Role.ADMIN, "boss@example.com"))
+        call_command("set_admin", email="Boss@Example.com", password="first-long-pass")
+        u = User.objects.get(email="boss@example.com")
+        self.assertEqual(u.role, Role.ADMIN)
         self.assertFalse(u.is_superuser)
-        call_command("set_admin", username="boss", email="new@example.com", password="second-long-pass")
-        u.refresh_from_db()
-        self.assertEqual(u.email, "new@example.com")
-        self.assertTrue(u.check_password("second-long-pass"))
-        self.assertEqual(User.objects.filter(username="boss").count(), 1)
+        login = lambda who, pw: APIClient().post(
+            "/meridian/api/auth/login/", {"username": who, "password": pw}, format="json")
+        self.assertEqual(login("boss@example.com", "first-long-pass").status_code, 200)
+        self.assertEqual(login("BOSS@example.com", "first-long-pass").status_code, 200)
+        call_command("set_admin", email="boss@example.com", password="second-long-pass")
+        self.assertEqual(User.objects.filter(email="boss@example.com").count(), 1)
+        self.assertEqual(login("boss@example.com", "first-long-pass").status_code, 400)
+        self.assertEqual(login("boss@example.com", "second-long-pass").status_code, 200)
 
-    def test_set_admin_promotes_an_existing_user_and_rejects_bad_input(self):
+    def test_set_admin_promotes_an_existing_account_with_that_email(self):
         from django.core.management import call_command
         from django.core.management.base import CommandError
-        User.objects.create_user(username="ann", password="x-old-password", role=Role.FACULTY)
-        call_command("set_admin", username="ann", email="ann@example.com", password="brand-new-pass")
+        User.objects.create_user(username="ann", email="ann@example.com", password="x-old-password", role=Role.FACULTY)
+        call_command("set_admin", email="ann@example.com", password="brand-new-pass")
         self.assertEqual(User.objects.get(username="ann").role, Role.ADMIN)
+        self.assertEqual(User.objects.count(), 1)
         with self.assertRaises(CommandError):
-            call_command("set_admin", username="x", email="not-an-email", password="brand-new-pass")
+            call_command("set_admin", email="not-an-email", password="brand-new-pass")
         with self.assertRaises(CommandError):
-            call_command("set_admin", username="x", email="x@example.com", password="123")
+            call_command("set_admin", email="x@example.com", password="123")
+
+    def test_email_login_is_ambiguous_safe(self):
+        User.objects.create_user(username="a1", email="same@example.com", password="pw-long-enough")
+        User.objects.create_user(username="a2", email="same@example.com", password="pw-long-enough")
+        r = APIClient().post("/meridian/api/auth/login/",
+                             {"username": "same@example.com", "password": "pw-long-enough"}, format="json")
+        self.assertEqual(r.status_code, 400)

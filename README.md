@@ -105,10 +105,10 @@ Create faculty and student accounts from the sign-up page. Admins can't be self-
 one from the server:
 
 ```bash
-python manage.py set_admin --username <name> --email <email>     # asks for the password
+python manage.py set_admin --email <email>     # asks for the password
 ```
 
-Run it again for the same username to change that admin's email and password.
+Admins sign in with that email and password. Run it again for the same email to change the password.
 
 ## Auth
 

@@ -44,7 +44,15 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        user = authenticate(username=attrs["username"], password=attrs["password"])
+        login = attrs["username"].strip()
+        username = login
+        # Signing in with an email works too (admins are created with just an email). An exact
+        # username match wins; otherwise the email must belong to exactly one account.
+        if "@" in login and not User.objects.filter(username=login).exists():
+            matches = list(User.objects.filter(email__iexact=login)[:2])
+            if len(matches) == 1:
+                username = matches[0].username
+        user = authenticate(username=username, password=attrs["password"])
         if not user:
             raise serializers.ValidationError("invalid credentials")
         attrs["user"] = user
