@@ -25,6 +25,10 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate_role(self, value):
         if value not in Role.values:
             raise serializers.ValidationError("invalid role")
+        # Anyone can reach this endpoint, so it can never mint an admin. Admins are set from
+        # the server with `manage.py set_admin` (or promoted by an existing admin).
+        if value == Role.ADMIN:
+            raise serializers.ValidationError("admin accounts cannot be created here")
         return value
 
     def create(self, validated_data):

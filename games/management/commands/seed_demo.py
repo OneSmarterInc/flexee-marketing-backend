@@ -16,17 +16,6 @@ class Command(BaseCommand):
     help = "Create a demo game with faculty + four teams for local testing."
 
     def handle(self, *args, **options):
-        admin, a_created = User.objects.get_or_create(
-            username="admin", defaults={"email": "admin@example.com", "role": Role.ADMIN})
-        # admin is an application ROLE (not a Django superuser)
-        admin.role = Role.ADMIN
-        admin.is_staff = False
-        admin.is_superuser = False
-        admin.set_password("adminpass123")
-        admin.save()
-        if a_created:
-            self.stdout.write("created admin / adminpass123 (admin role)")
-
         faculty, created = User.objects.get_or_create(
             username="faculty", defaults={"email": "faculty@example.com",
                                           "role": Role.FACULTY})

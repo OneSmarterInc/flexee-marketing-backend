@@ -125,3 +125,41 @@ class PasswordResetTests(TestCase):
     def test_a_mail_failure_does_not_reveal_anything(self):
         with patch("accounts.password_reset.send_mail", side_effect=OSError("down")):
             self.assertEqual(self._request().json(), {"message": pr.REQUEST_MESSAGE})
+
+
+class SignUpAndAdminTests(TestCase):
+    def test_sign_up_makes_students_and_faculty_but_never_an_admin(self):
+        client = APIClient()
+        for role in ("student", "faculty"):
+            r = client.post("/meridian/api/auth/register/", {
+                "username": f"new_{role}", "email": f"{role}@example.com",
+                "password": "a-long-password", "role": role}, format="json")
+            self.assertEqual(r.status_code, 201, r.content)
+        r = client.post("/meridian/api/auth/register/", {
+            "username": "sneaky", "email": "s@example.com",
+            "password": "a-long-password", "role": "admin"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(User.objects.filter(username="sneaky").exists())
+
+    def test_set_admin_creates_then_updates_the_same_account(self):
+        from django.core.management import call_command
+        call_command("set_admin", username="boss", email="Boss@Example.com", password="first-long-pass")
+        u = User.objects.get(username="boss")
+        self.assertEqual((u.role, u.email), (Role.ADMIN, "boss@example.com"))
+        self.assertFalse(u.is_superuser)
+        call_command("set_admin", username="boss", email="new@example.com", password="second-long-pass")
+        u.refresh_from_db()
+        self.assertEqual(u.email, "new@example.com")
+        self.assertTrue(u.check_password("second-long-pass"))
+        self.assertEqual(User.objects.filter(username="boss").count(), 1)
+
+    def test_set_admin_promotes_an_existing_user_and_rejects_bad_input(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        User.objects.create_user(username="ann", password="x-old-password", role=Role.FACULTY)
+        call_command("set_admin", username="ann", email="ann@example.com", password="brand-new-pass")
+        self.assertEqual(User.objects.get(username="ann").role, Role.ADMIN)
+        with self.assertRaises(CommandError):
+            call_command("set_admin", username="x", email="not-an-email", password="brand-new-pass")
+        with self.assertRaises(CommandError):
+            call_command("set_admin", username="x", email="x@example.com", password="123")

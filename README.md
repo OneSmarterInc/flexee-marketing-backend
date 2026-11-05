@@ -95,14 +95,20 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                      # optional; sensible dev defaults without it
 python manage.py migrate
-python manage.py seed_demo                # faculty + 4 teams + students
+python manage.py seed_demo                # optional: a demo faculty + 4 teams + students
 python manage.py runserver
 ```
 
 Then check `http://127.0.0.1:8000/meridian/api/health/`.
 
-Demo credentials (from `seed_demo`): faculty `faculty` / `facultypass123`; students
-`student_a`..`student_d` / `studentpass123`.
+Create faculty and student accounts from the sign-up page. Admins can't be self-created; set
+one from the server:
+
+```bash
+python manage.py set_admin --username <name> --email <email>     # asks for the password
+```
+
+Run it again for the same username to change that admin's email and password.
 
 ## Auth
 
@@ -110,7 +116,7 @@ Token auth (also session auth for the browsable API). Get a token:
 
 ```bash
 curl -X POST localhost:8000/meridian/api/auth/login/ -H 'Content-Type: application/json' \
-  -d '{"username":"faculty","password":"facultypass123"}'
+  -d '{"username":"<username>","password":"<password>"}'
 # -> {"token": "...", "user": {...}}
 ```
 
