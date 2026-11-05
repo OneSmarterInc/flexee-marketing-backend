@@ -2,6 +2,7 @@
 
     python manage.py set_admin --email priya@school.edu
     python manage.py set_admin --email priya@school.edu --password '...'
+    python manage.py set_admin --email priya@school.edu --role faculty
 
 If an account with that email exists it becomes an admin with the new password; otherwise it is
 created (its username is the email, and it signs in with the email). Leave --password off to be
@@ -25,6 +26,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--email", required=True)
         parser.add_argument("--password", help="Omit to be prompted.")
+        parser.add_argument("--role", choices=[Role.ADMIN, Role.FACULTY], default=Role.ADMIN,
+                            help="Role to give the account (default: admin).")
 
     def handle(self, *args, **options):
         email = options["email"].strip().lower()
@@ -51,9 +54,9 @@ class Command(BaseCommand):
         else:
             user, created = User(username=email), True
         user.email = email
-        user.role = Role.ADMIN
+        user.role = options["role"]
         user.is_active = True
         user.set_password(password)
         user.save()
         self.stdout.write(self.style.SUCCESS(
-            f"{'Created' if created else 'Updated'} admin {email}. Sign in with that email and the password."))
+            f"{'Created' if created else 'Updated'} {options['role']} {email}. Sign in with that email and the password."))
