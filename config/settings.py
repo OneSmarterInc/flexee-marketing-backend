@@ -79,8 +79,8 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 # --- Database ---------------------------------------------------------------------
-# SQLite for local dev. Point DATABASE_URL-style env vars at Postgres for production
-# (the persistence schema is storage-agnostic per the handoff).
+# SQLite for local dev. Set POSTGRES_DB (and the other POSTGRES_* vars) to use Postgres, which
+# is what production runs on. Needs `psycopg` (in requirements.txt).
 if os.environ.get("POSTGRES_DB"):
     DATABASES = {
         "default": {
@@ -90,6 +90,9 @@ if os.environ.get("POSTGRES_DB"):
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", ""),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            # Keep connections open between requests instead of reconnecting on every one.
+            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+            "CONN_HEALTH_CHECKS": True,
         }
     }
 else:

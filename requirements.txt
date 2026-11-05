@@ -9,6 +9,6 @@ python-dotenv>=1.0
 anthropic==0.121.0
 # openai>=1.50
 
-# Optional — production database driver.
-# psycopg[binary]>=3.2
+# Production database driver (Postgres). Only imported when POSTGRES_DB is set.
+psycopg[binary]>=3.2
 pytest>=8.0

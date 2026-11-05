@@ -184,8 +184,36 @@ and `pip install anthropic` (or `openai`).
 
 ## Database
 
-SQLite by default. Set the `POSTGRES_*` vars in `.env` to use Postgres (the schema is
-storage-agnostic). `python manage.py migrate` either way.
+SQLite by default (local dev). Production runs on Postgres: set the `POSTGRES_*` variables in
+`.env` and Django switches over, with no code change. The driver (`psycopg`) is in
+`requirements.txt`.
+
+Setting up Postgres on EC2 (Ubuntu):
+
+```bash
+sudo apt install -y postgresql
+sudo -u postgres psql -c "CREATE USER flexee WITH PASSWORD '<a-strong-password>';"
+sudo -u postgres psql -c "CREATE DATABASE flexee OWNER flexee ENCODING 'UTF8' TEMPLATE template0;"
+```
+
+Then in `backend/.env`:
+
+```
+POSTGRES_DB=flexee
+POSTGRES_USER=flexee
+POSTGRES_PASSWORD=<the same password>
+POSTGRES_HOST=localhost
+```
+
+```bash
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py set_admin --email <you@example.com>
+```
+
+The database must be UTF8. A new empty Postgres database starts with no users, so create the
+admin with `set_admin`; the SQLite file on your laptop does not move over. The full suite passes
+against Postgres 14.
 
 ## Contract alignment (cross-checked against the `ref_` bundle)
 

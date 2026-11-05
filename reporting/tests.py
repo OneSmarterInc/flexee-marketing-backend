@@ -637,7 +637,9 @@ class ViewTests(ReportingTestCase):
         self.assertEqual((h["ai_enabled"], h["ai_spent_this_month_usd"], h["ai_ceiling_usd"]), (True, 1.5, 50.0))
         self.assertEqual(h["connections_active"], 1)
         self.assertEqual(h["migrations_pending"], 0)
-        self.assertTrue(h["database_version"].startswith("SQLite"))
+        from django.db import connection
+        self.assertTrue(h["database_version"].startswith(
+            "PostgreSQL" if connection.vendor == "postgresql" else "SQLite"))
         for key in ("php_version", "jobs_waiting", "oldest_job_minutes", "failed_jobs_7d", "certificate_expires_at",
                     "certificate_days_left"):
             self.assertIsNone(h[key], key)
