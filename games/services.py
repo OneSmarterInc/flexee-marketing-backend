@@ -370,7 +370,8 @@ class GameService:
         self._carry_forward_forecasts(rnd)  # a team that skipped this round's forecast repeats its last one
         self._score_forecasts(rnd)  # Group C: grade this round's predictions against the result
 
-        self.game.current_round = min(rnd + 1, self.game.num_rounds)
+        # Never move the game backwards: re-closing a reopened earlier round keeps the open round.
+        self.game.current_round = max(self.game.current_round, min(rnd + 1, self.game.num_rounds))
         if rnd >= self.game.num_rounds:
             self.game.status = models.GameStatus.COMPLETE
         else:

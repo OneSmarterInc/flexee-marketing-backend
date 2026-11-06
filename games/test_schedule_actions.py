@@ -100,3 +100,25 @@ class ReopenedRoundCanBeExtended(TestCase):
         r = c.post(f"{API}/games/{game.pk}/extend-round/", {"round": 1, "due": _iso(4), "cascade": False}, format="json")
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual({x["round"]: x for x in r.data["schedule"]}[1]["due"], _iso(4))
+
+
+class ReclosingAReopenedRoundKeepsTheGameMovingForward(TestCase):
+    """Re-closing a reopened earlier round must not move the open round backwards (audit, 6 Nov)."""
+
+    def test_reclosing_round_one_keeps_round_three_open(self):
+        from accounts.models import Role, User
+        from flexee_engine import api
+        from games import models
+        from games.services import GameService
+        f = User.objects.create_user(username="rc@x.edu", email="rc@x.edu", password="pw-123456", role=Role.FACULTY)
+        g = models.Game.objects.create(name="G", faculty=f, config_snapshot=api.default_config(), num_rounds=14)
+        models.Team.objects.create(game=g, name="Team A")
+        for r in (1, 2):
+            GameService(g).close_round(r)
+            g.refresh_from_db()
+        GameService(g).reopen_round(1)
+        g.refresh_from_db()
+        GameService(g).close_round(1)
+        g.refresh_from_db()
+        self.assertEqual(g.current_round, 3)
+        self.assertEqual(sorted(g.locked_rounds), [1, 2])
