@@ -494,6 +494,7 @@ class GameViewSet(viewsets.ModelViewSet):
             permission_classes=[IsFaculty])
     def extend_round(self, request, pk=None):
         from datetime import date
+        from .deadlines import clock_runs, today_in
         from .schedule import extend_round as _extend
         game = self.get_object()
         try:
@@ -502,6 +503,14 @@ class GameViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise ValidationError({"detail": "Provide a round number and a due date (YYYY-MM-DD)."})
         cascade = bool(request.data.get("cascade", True))
+        if game.status == models.GameStatus.COMPLETE:
+            raise ValidationError({"detail": "This simulation is finished, so there is nothing left to extend."})
+        if round_no < game.current_round and round_no in (game.locked_rounds or []):
+            raise ValidationError({"detail": (
+                f"Round {round_no} has already closed, so a new date would change nothing. "
+                f"Reopen it with a new due date instead (round {game.current_round} is the one open now).")})
+        if clock_runs(game) and new_due < today_in(game.timezone):
+            raise ValidationError({"detail": "That date has already passed. Choose today or a later date."})
         try:
             game.schedule = _extend(game.schedule, round_no, new_due, cascade=cascade)
         except ValueError as e:
@@ -513,11 +522,41 @@ class GameViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="reopen-round",
             permission_classes=[IsFaculty])
     def reopen_round(self, request, pk=None):
+        """Unlock a closed round so teams can resubmit. On a live class whose deadline for that
+        round has passed, a new due date is required too: otherwise the round would unlock but
+        every save would still be refused. Only that round's date moves; later rounds keep theirs."""
+        from datetime import date
+        from .deadlines import clock_runs, round_deadline, now_utc, today_in
+        from .schedule import extend_round as _extend
         game = self.get_object()
-        rnd = int(request.data.get("round", game.current_round))
+        try:
+            rnd = int(request.data.get("round", game.current_round))
+        except (TypeError, ValueError):
+            raise ValidationError({"detail": "Provide a round number."})
+        due_raw = request.data.get("due")
+        new_due = None
+        if due_raw:
+            try:
+                new_due = date.fromisoformat(str(due_raw))
+            except ValueError:
+                raise ValidationError({"detail": "Provide the new due date as YYYY-MM-DD."})
+        if clock_runs(game):
+            deadline = round_deadline(game, rnd)
+            passed = deadline is not None and now_utc() > deadline
+            if new_due is None and passed:
+                raise ValidationError({"detail": (
+                    f"Round {rnd}'s deadline has passed. Choose a new due date so teams can resubmit.")})
+            if new_due is not None and new_due < today_in(game.timezone):
+                raise ValidationError({"detail": "That date has already passed. Choose today or a later date."})
+        if new_due is not None:
+            try:
+                game.schedule = _extend(game.schedule, rnd, new_due, cascade=False)
+            except ValueError as e:
+                raise ValidationError({"detail": str(e)})
+            game.save(update_fields=["schedule"])
         self._service(game).reopen_round(rnd)
         game.refresh_from_db()
-        return Response({"round": rnd, "reopened": True,
+        return Response({"round": rnd, "reopened": True, "schedule": game.schedule,
                          "locked_rounds": game.locked_rounds})
 
     # ---- A2: round result (scoped) ----
