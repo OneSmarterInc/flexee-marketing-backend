@@ -142,18 +142,25 @@ class GameService:
         self.game.save(update_fields=["locked_rounds"])
 
     # ---- submissions ----
-    def _lock_open_round(self, rnd: int) -> None:
+    def _lock_open_round(self, rnd: int, allow_reopened: bool = False) -> None:
         """Call inside a transaction, before writing anything for round `rnd`.
 
         Locks the game row (the close's claim updates the same row, so a save and a close can't
         overlap), then checks, on the freshly read row, that `rnd` is the round open now, that it
-        isn't closed or closing, and that its deadline hasn't passed (audit M1-M3)."""
+        isn't closed or closing, and that its deadline hasn't passed (audit M1-M3).
+
+        `allow_reopened`: a round faculty reopened (closed earlier, so it has a result and the game
+        has moved past it, and it is no longer locked) also counts as open, for decisions only. A
+        forecast never reopens: its score was settled at the close (audit M2)."""
         game = models.Game.objects.select_for_update().get(pk=self.game.pk)
         self.game.locked_rounds, self.game.current_round = game.locked_rounds, game.current_round
         if rnd in (game.locked_rounds or []):
             raise ValidationError({"round": f"Round {rnd} is closed; ask faculty to reopen it."})
         if rnd != game.current_round:
-            raise ValidationError({"round": f"Round {rnd} isn't open. Round {game.current_round} is."})
+            reopened = (allow_reopened and rnd < game.current_round
+                        and models.RoundResult.objects.filter(game=game, round=rnd).exists())
+            if not reopened:
+                raise ValidationError({"round": f"Round {rnd} isn't open. Round {game.current_round} is."})
         if game.close_claimed_at and dj_tz.now() - game.close_claimed_at < self.CLAIM_STALE:
             raise ValidationError({"round": f"Round {rnd} is closing now, so this change was not saved."})
         # A live game's round closes at its deadline (23:59 game time). Between the deadline
@@ -168,7 +175,7 @@ class GameService:
     def submit(self, rnd: int, team: models.Team, levers: dict, user=None) -> dict:
         if team.reference_path:
             raise ValidationError({"team": "a reference firm plays a fixed path; nobody can decide for it"})
-        self._lock_open_round(rnd)
+        self._lock_open_round(rnd, allow_reopened=True)   # faculty can reopen a closed round
         cleaned = validate_decision(levers, self.open_levers(rnd), self.config)
         obj, _ = models.RoundSubmission.objects.update_or_create(
             game=self.game, round=rnd, team=team,

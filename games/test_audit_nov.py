@@ -117,6 +117,10 @@ class M4SignInIsRateLimited(TestCase):
 class H3SafeDefaults(TestCase):
     def test_debug_is_off_unless_turned_on(self):
         import subprocess, sys, os
+        from django.conf import settings as dj_settings
+        env_file = dj_settings.BASE_DIR / ".env"
+        if env_file.exists() and "DJANGO_DEBUG" in env_file.read_text():
+            self.skipTest("this machine's .env sets DJANGO_DEBUG, so the unset default can't be observed here")
         env = {k: v for k, v in os.environ.items() if k not in ("DJANGO_DEBUG",)}
         env["DJANGO_SECRET_KEY"] = "a-real-secret-for-this-check"
         out = subprocess.run([sys.executable, "-c",
@@ -124,3 +128,40 @@ class H3SafeDefaults(TestCase):
                               "django.setup();from django.conf import settings;print(settings.DEBUG)"],
                              env=env, capture_output=True, text=True)
         self.assertIn("False", out.stdout, out.stderr)
+
+
+class ReopenedRoundsStillTakeDecisions(TestCase):
+    """Faculty can reopen a closed round (locked product decision 2). The audit's open-round check
+    must not turn that into a dead button."""
+
+    def _closed_then_reopened(self):
+        game, team, owner = _game()
+        svc = GameService(game)
+        svc.close_round(1)
+        svc.reopen_round(1)
+        game.refresh_from_db()
+        self.assertEqual(game.current_round, 2)
+        return game, team, GameService(game)
+
+    def test_a_reopened_round_takes_a_decision_again(self):
+        game, team, svc = self._closed_then_reopened()
+        svc.submit(1, team, {})        # round 1 is a listening round: an empty decision is valid
+        self.assertTrue(models.RoundSubmission.objects.filter(game=game, round=1, team=team).exists())
+
+    def test_a_reopened_round_still_refuses_a_forecast(self):
+        game, team, svc = self._closed_then_reopened()
+        with self.assertRaises(ValidationError):
+            svc.submit_forecast(1, team, "own_share", 5.0)
+
+    def test_a_closed_round_that_is_not_reopened_is_still_refused(self):
+        game, team, owner = _game()
+        svc = GameService(game)
+        svc.close_round(1)
+        game.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            GameService(game).submit(1, team, {})
+
+    def test_a_round_that_never_closed_is_still_refused(self):
+        game, team, owner = _game()
+        with self.assertRaises(ValidationError):
+            GameService(game).submit(3, team, {})
