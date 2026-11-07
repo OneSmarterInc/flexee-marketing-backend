@@ -17,6 +17,7 @@ Rounds
 - Between the deadline and the moment the close runs, a change is refused rather than quietly accepted. The last round is never closed automatically; a faculty member closes it.
 - A team that has not submitted when a round closes plays that round on the average of the teams that did submit (the cohort average), not on the fixed baseline. A team that did not make a forecast repeats its previous forecast.
 - A closed round is locked. A faculty member can reopen it and close it again.
+- When you reopen a closed round, teams can change their decisions for it until the new due date you set. On a class that is open to students, reopening needs that new due date; without one the round would unlock but every save would still be refused. A reopened round isn't closed again by itself. The new decisions count when the round that's open now closes, and the reopened round's results update then.
 - Students get a reminder email about a day before a round closes (about half a round when a round is shorter than two days), once per round, only if their team has not submitted. Test accounts and inactive accounts are skipped.
 - Extending a round's due date moves the later rounds with it.
 
