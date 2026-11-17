@@ -189,13 +189,13 @@ def get_client(client_id: str) -> ReportingClient | None:
     try:
         doc = fetch_client_document(client_id)
     except Exception as exc:
-        log.warning("reporting: could not read the client metadata document %s: %r", client_id, exc)
+        log.warning("reporting: could not read the client metadata document %r: %r", client_id, exc)
         return found
     if doc is None:
-        log.warning("reporting: the client metadata document %s did not answer 200", client_id)
+        log.warning("reporting: the client metadata document %r did not answer 200", client_id)
         return found
     if not isinstance(doc, dict) or doc.get("client_id") != client_id or not isinstance(doc.get("redirect_uris"), list):
-        log.warning("reporting: the client metadata document %s is not a valid document for that client id", client_id)
+        log.warning("reporting: the client metadata document %r is not a valid document for that client id", client_id)
         return None
     uris = [u for u in doc["redirect_uris"] if isinstance(u, str) and len(u) <= 500 and redirect_allowed(u)]
     if not uris:
