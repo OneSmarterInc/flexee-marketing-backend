@@ -358,12 +358,14 @@ A read-only MCP endpoint so an administrator can connect Claude to operational r
 python manage.py migrate
 # one of: a scheduler process, an external cron, or neither (the lazy path still runs)
 python manage.py run_scheduler            # or: --once from cron every 5 minutes
+# cron (ubuntu user, `crontab -e`); flock stops two passes overlapping:
+# */5 * * * * cd ~/flexee-marketing-backend && flock -n /tmp/flexee-marketing-sweep.lock venv/bin/python manage.py run_scheduler --once >> ~/flexee-marketing-sweep.log 2>&1
 gunicorn config.wsgi --timeout 120 ...    # Ask Claude can take about a minute
 ```
 
 Environment: `PUBLIC_API_URL`, `FRONTEND_URL`, `CRON_SECRET` (only for the cron endpoint),
 `ANTHROPIC_API_KEY`, `FLEXEE_ASK_MODEL`, `FLEXEE_AI_MONTHLY_CEILING_USD`, `GIT_COMMIT` (shown by
-`report_health`), `REMINDER_EMAILS_ENABLED`, `EMAIL_DRY_RUN`, and a real mail backend
+`report_health`; read from git when not set, so restart the service after each `git pull`), `REMINDER_EMAILS_ENABLED`, `EMAIL_DRY_RUN`, and a real mail backend
 (`MAIL_BACKEND`) for reminders and password reset. See `.env.example`.
 
 ## Tests

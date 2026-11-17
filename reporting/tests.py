@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 from datetime import date, datetime, timedelta, timezone as dt_timezone
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -667,6 +668,12 @@ class ViewTests(ReportingTestCase):
     @override_settings(GIT_COMMIT="abc1234")
     def test_the_deployed_commit(self):
         self.assertEqual(self.c.call("report_health")[0]["commit"], "abc1234")
+
+    def test_the_commit_falls_back_to_git_and_env_wins(self):
+        from config.version import deployed_commit
+        self.assertEqual(deployed_commit("  abc1234 "), "abc1234")          # .env wins
+        self.assertRegex(deployed_commit(""), r"^[0-9a-f]{7}$")              # this repo is a git checkout
+        self.assertEqual(deployed_commit("", Path("/nonexistent-dir")), "")  # no checkout: unknown, not an error
 
     def test_no_name_or_email_of_a_person_appears_anywhere(self):
         g = _game()

@@ -201,7 +201,9 @@ CRON_SECRET = os.environ.get("CRON_SECRET", "")
 # The API's public address (no path), so the connector's discovery documents name the right
 # host. FRONTEND_URL above is the web app's.
 PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
-GIT_COMMIT = os.environ.get("GIT_COMMIT", "").strip()
+# GIT_COMMIT in .env wins; otherwise read from git when the app starts (config/version.py).
+from config.version import deployed_commit  # noqa: E402
+GIT_COMMIT = deployed_commit(os.environ.get("GIT_COMMIT", ""), BASE_DIR)
 # Ask Claude is separate from the voice layer's cheap model: it reads a different model.
 FLEXEE_ASK_MODEL = os.environ.get("FLEXEE_ASK_MODEL", "claude-sonnet-5-5")
 FLEXEE_ASK_QUESTIONS_PER_MONTH = int(os.environ.get("FLEXEE_ASK_QUESTIONS_PER_MONTH", "100"))
