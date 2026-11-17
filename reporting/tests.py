@@ -263,9 +263,23 @@ class ClientMetadataDocumentTests(ReportingTestCase):
         with patch.object(oauth, "fetch_client_document", return_value=doc):
             self.assertFalse(self.check(self.CID)["ok"])
 
-    def test_an_unreachable_document_is_refused(self):
-        with patch.object(oauth, "fetch_client_document", side_effect=OSError("down")):
+    def test_an_unreachable_document_is_refused_and_logged(self):
+        with patch.object(oauth, "fetch_client_document", side_effect=OSError("down")), \
+                self.assertLogs("reporting.oauth", level="WARNING") as logs:
             self.assertFalse(self.check(self.CID)["ok"])
+        self.assertIn("down", logs.output[0])
+
+    def test_the_document_is_fetched_with_a_named_user_agent(self):
+        class Res:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n): return b'{"client_id": "x", "redirect_uris": []}'
+        with patch.object(oauth.urllib.request, "urlopen", return_value=Res()) as urlopen:
+            oauth.fetch_client_document(self.CID)
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("User-agent"), oauth.USER_AGENT)
+        self.assertNotIn("Python-urllib", req.get_header("User-agent"))
 
 
 class TokenTests(ReportingTestCase):

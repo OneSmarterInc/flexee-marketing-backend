@@ -15,6 +15,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import urllib.request
@@ -38,6 +39,10 @@ REDIRECT_HOSTS = ("claude.ai", "claude.com", "localhost", "127.0.0.1")
 CLIENT_METADATA_HOSTS = ("claude.ai", "claude.com")
 LOOPBACK = ("localhost", "127.0.0.1")
 PKCE = re.compile(r"^[A-Za-z0-9\-._~]{43,128}$")
+# Claude's hosts sit behind a firewall that refuses Python's default "Python-urllib" agent.
+USER_AGENT = "Flexee-Marketing-Reporting/1.0 (+https://marketing.flexee.org)"
+
+log = logging.getLogger(__name__)
 
 
 def digest(value: str) -> str:
@@ -138,7 +143,7 @@ def redirect_matches(registered: list, uri: str) -> bool:
 # ------------------------------------------------------------------------------- clients
 def fetch_client_document(url: str) -> dict | None:
     """A client's metadata document. Replaced in tests."""
-    req = urllib.request.Request(url, headers={"accept": "application/json"})
+    req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=5) as res:        # noqa: S310 (https, Claude hosts only)
         if res.status != 200:
             return None
@@ -183,11 +188,14 @@ def get_client(client_id: str) -> ReportingClient | None:
         return None
     try:
         doc = fetch_client_document(client_id)
-    except Exception:
+    except Exception as exc:
+        log.warning("reporting: could not read the client metadata document %s: %r", client_id, exc)
         return found
     if doc is None:
+        log.warning("reporting: the client metadata document %s did not answer 200", client_id)
         return found
     if not isinstance(doc, dict) or doc.get("client_id") != client_id or not isinstance(doc.get("redirect_uris"), list):
+        log.warning("reporting: the client metadata document %s is not a valid document for that client id", client_id)
         return None
     uris = [u for u in doc["redirect_uris"] if isinstance(u, str) and len(u) <= 500 and redirect_allowed(u)]
     if not uris:
